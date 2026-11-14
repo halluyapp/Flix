@@ -93,7 +93,7 @@ class _HomeScreenState extends State<HomeScreen> {
       backgroundColor: const Color(0xFF141414),
       extendBodyBehindAppBar: true,
       appBar: AppBar(
-        backgroundColor: Colors.black.withOpacity(0.5),
+        backgroundColor: Colors.black.withValues(alpha: 0.5),
         elevation: 0,
         title: Row(
           children: [

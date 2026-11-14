@@ -73,7 +73,7 @@ class _NewAndHotScreenState extends State<NewAndHotScreen> with SingleTickerProv
     return Scaffold(
       backgroundColor: const Color(0xFF141414),
       appBar: AppBar(
-        backgroundColor: Colors.black.withOpacity(0.8),
+        backgroundColor: Colors.black.withValues(alpha: 0.8),
         elevation: 0,
         title: const Text(
           'New & Hot',

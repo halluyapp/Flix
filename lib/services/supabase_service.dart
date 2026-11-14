@@ -17,7 +17,7 @@ class SupabaseService {
           !ApiConstants.supabaseAnonKey.contains('placeholder')) {
         await Supabase.initialize(
           url: ApiConstants.supabaseUrl,
-          anonKey: ApiConstants.supabaseAnonKey,
+          publishableKey: ApiConstants.supabaseAnonKey,
         );
         _client = Supabase.instance.client;
       }

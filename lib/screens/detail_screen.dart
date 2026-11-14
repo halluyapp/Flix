@@ -104,7 +104,7 @@ class _DetailScreenState extends State<DetailScreen> with SingleTickerProviderSt
                 ),
                 Container(
                   height: 220,
-                  color: Colors.black.withOpacity(0.35),
+                  color: Colors.black.withValues(alpha: 0.35),
                 ),
                 GestureDetector(
                   onTap: () {
@@ -115,7 +115,7 @@ class _DetailScreenState extends State<DetailScreen> with SingleTickerProviderSt
                   child: Container(
                     padding: const EdgeInsets.all(14),
                     decoration: BoxDecoration(
-                      color: Colors.black.withOpacity(0.6),
+                      color: Colors.black.withValues(alpha: 0.6),
                       shape: BoxShape.circle,
                       border: Border.all(color: Colors.white, width: 2),
                     ),

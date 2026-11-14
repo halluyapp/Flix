@@ -38,9 +38,9 @@ class HeroBillboard extends StatelessWidget {
               begin: Alignment.topCenter,
               end: Alignment.bottomCenter,
               colors: [
-                Colors.black.withOpacity(0.3),
+                Colors.black.withValues(alpha: 0.3),
                 Colors.transparent,
-                const Color(0xFF141414).withOpacity(0.8),
+                const Color(0xFF141414).withValues(alpha: 0.8),
                 const Color(0xFF141414),
               ],
               stops: const [0.0, 0.4, 0.8, 1.0],
