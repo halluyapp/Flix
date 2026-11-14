@@ -1,35 +1,31 @@
 class ApiConstants {
-  // Configured via compile-time environment or fallback to Lovable Cloud Edge Functions
-  static const String supabaseUrl = String.fromEnvironment(
-    'LOVABLE_SUPABASE_URL',
-    defaultValue: 'https://flix-cloud-backend.lovable.app',
+  // TMDB credentials.
+  //
+  // These are the repository owner's own credentials, compiled into the app as
+  // defaults so CI builds work without extra configuration. The repository is
+  // private and this is a read-only TMDB credential.
+  //
+  // Any build can override them without editing this file:
+  //   flutter build apk --release --dart-define=TMDB_READ_TOKEN=...
+  static const String tmdbReadToken = String.fromEnvironment(
+    'TMDB_READ_TOKEN',
+    defaultValue:
+        'eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiJhYzIxZjEwYzQ3M2JhNzZlZGNkODk4M2IxYWUyZWI4OSIsIm5iZiI6MTc2NzYxODIxMi4wNTIsInN1YiI6IjY5NWJiNmE0ZWFlODE5Y2E1NmNiZDNhNiIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.2Aq5ZmRmIU-Qa10uz9IE3b2BW5F-dGc6JyzyRM0iHMA',
   );
 
-  static const String supabaseAnonKey = String.fromEnvironment(
-    'LOVABLE_SUPABASE_ANON_KEY',
-    defaultValue: 'public-anon-key-placeholder',
+  // Fallback v3 key, used only when no read token is present.
+  static const String tmdbApiKey = String.fromEnvironment(
+    'TMDB_API_KEY',
+    defaultValue: 'ac21f10c473ba76edcd8983b1ae2eb89',
   );
 
-  // TMDB Proxy / Edge Function URL (secrets stored server-side in Lovable Cloud)
-  static const String tmdbProxyUrl = String.fromEnvironment(
-    'LOVABLE_TMDB_PROXY_URL',
-    defaultValue: 'https://flix-cloud-backend.lovable.app/functions/v1/tmdb-proxy',
-  );
-
-  static const String streamResolverUrl = String.fromEnvironment(
-    'LOVABLE_STREAM_RESOLVER_URL',
-    defaultValue: 'https://flix-cloud-backend.lovable.app/functions/v1/stream-resolver',
-  );
-
-  // Direct TMDB fallback when supplied via --dart-define
-  static const String tmdbApiKey = String.fromEnvironment('TMDB_API_KEY', defaultValue: '');
-  static const String tmdbReadToken = String.fromEnvironment('TMDB_READ_TOKEN', defaultValue: '');
+  static bool get hasTmdbCredentials => tmdbApiKey.isNotEmpty || tmdbReadToken.isNotEmpty;
 
   static const String tmdbBaseUrl = 'https://api.themoviedb.org/3';
   static const String tmdbImageBaseW500 = 'https://image.tmdb.org/t/p/w500';
   static const String tmdbImageBaseOriginal = 'https://image.tmdb.org/t/p/original';
 
-  // Zarhosting Media Provider Endpoints
+  // Zarhosting Media Provider Endpoints (same integration used by Hallyu TV)
   static const String zarhostingBaseUrl = 'https://movieapi.zarhosting.dpdns.org/api/public/v1';
 
   static const Map<String, String> zarhostingApiHeaders = {

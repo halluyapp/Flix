@@ -31,6 +31,16 @@ class ZarhostingService {
         .trim();
   }
 
+  /// Provider titles often carry a language badge or a season suffix
+  /// ("Breaking Bad [Hindi] S5"). Strip those before comparing so a season
+  /// entry still matches its TMDB series.
+  static String _comparisonTitle(String raw) {
+    var t = raw.replaceAll(RegExp(r'\[(?:[^\]]*)\]'), ' ');
+    t = t.replaceAll(RegExp(r'\((?:[^)]*)\)'), ' ');
+    t = t.replaceAll(RegExp(r'\b(?:s\d{1,2}|season\s?\d{1,2})\b', caseSensitive: false), ' ');
+    return normalizeTitle(t);
+  }
+
   static double calculateSimilarity(String s1, String s2) {
     final n1 = normalizeTitle(s1);
     final n2 = normalizeTitle(s2);
@@ -82,7 +92,9 @@ class ZarhostingService {
 
         final itemTitle = (item['title'] ?? item['name'] ?? item['subject_title'] ?? '').toString();
         final subjectId = (item['subject_id'] ?? item['subjectId'] ?? item['id'] ?? '').toString();
-        final detailPath = (item['detail_path'] ?? item['detailPath'] ?? '').toString();
+        // The stream endpoint only answers when detail_path is the provider
+        // slug; passing the subject id there returns HTTP 502.
+        final detailPath = (item['detail_path'] ?? item['detailPath'] ?? item['slug'] ?? '').toString();
 
         if (subjectId.isEmpty) continue;
 
@@ -98,19 +110,25 @@ class ZarhostingService {
           continue;
         }
 
-        final sim = calculateSimilarity(title, itemTitle);
+        final baseTitle = (item['base_title'] ?? item['baseTitle'] ?? '').toString();
+        final sim = [
+          calculateSimilarity(title, itemTitle),
+          if (baseTitle.isNotEmpty) calculateSimilarity(title, baseTitle),
+          calculateSimilarity(_comparisonTitle(title), _comparisonTitle(itemTitle)),
+        ].reduce((a, b) => a > b ? a : b);
         if (sim < 0.55) continue;
 
         double score = sim * 100.0;
 
-        // Year alignment weighting
+        // Year alignment weighting. Series season entries are dated by season
+        // release year, so they get a wider tolerance than movies.
         if (year > 0 && itemYear > 0) {
           final diff = (year - itemYear).abs();
           if (diff == 0) {
             score += 25.0;
           } else if (diff <= 1) {
             score += 15.0;
-          } else if (diff > 2) {
+          } else if (diff > (isSeries ? 8 : 2)) {
             score -= 20.0;
           }
         }
@@ -157,7 +175,10 @@ class ZarhostingService {
 
       for (final s in sourcesList) {
         if (s is Map) {
-          final src = StreamSource.fromJson(s.cast<String, dynamic>());
+          final map = s.cast<String, dynamic>();
+          // vip_locked sources are rejected by the CDN at playback time.
+          if (map['vip_locked'] == true) continue;
+          final src = StreamSource.fromJson(map);
           if (src.url.startsWith('https://') && !src.isPreview && !seenUrls.contains(src.url)) {
             seenUrls.add(src.url);
             sources.add(src);
@@ -165,17 +186,20 @@ class ZarhostingService {
         }
       }
 
-      // Append HLS playlists if present
-      final hlsList = (body['hls'] ?? []) as List;
-      for (final h in hlsList) {
-        final u = h.toString();
+      // Append adaptive manifests (HLS first, then DASH) when the provider
+      // exposes them.
+      for (final entry in [
+        ...((body['hls'] ?? []) as List).map((h) => MapEntry(h, 'HLS')),
+        ...((body['dash'] ?? []) as List).map((d) => MapEntry(d, 'DASH')),
+      ]) {
+        final u = entry.key.toString();
         if (u.startsWith('https://') && !seenUrls.contains(u)) {
           seenUrls.add(u);
           sources.add(StreamSource(
             url: u,
-            resolution: 'Auto (HLS)',
+            resolution: 'Auto (${entry.value})',
             qualityValue: 1080,
-            format: 'HLS',
+            format: entry.value,
             sizeBytes: 0,
             durationSeconds: 0,
             isPreview: false,

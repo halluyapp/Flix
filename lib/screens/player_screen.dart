@@ -1,4 +1,5 @@
 import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
@@ -36,6 +37,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   VideoPlayerController? _videoPlayerController;
   Timer? _overlayHideTimer;
   Timer? _progressSaveTimer;
+  UserStateService? _userState;
 
   bool _isResolving = true;
   String _statusMessage = 'Searching stream catalog...';
@@ -80,6 +82,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _resolveAndPlay();
   }
 
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Resolved once and cached: the provider must not be looked up from
+    // dispose()/timers where the element tree is already deactivated.
+    _userState = Provider.of<UserStateService>(context, listen: false);
+  }
+
   Future<void> _loadEpisodesIfSeries() async {
     if (widget.item.mediaType == 'tv') {
       final eps = await _tmdb.getSeasonEpisodes(widget.item.id, _currentSeason);
@@ -92,32 +102,42 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   Future<void> _resolveAndPlay() async {
+    if (!mounted) return;
     setState(() {
       _isResolving = true;
       _statusMessage = 'Connecting to Zarhosting CDN stream...';
       _showNextEpisodeCountdown = false;
     });
 
-    final resolved = await _resolver.resolve(
-      item: widget.item,
-      season: widget.item.mediaType == 'tv' ? _currentSeason : 0,
-      episode: widget.item.mediaType == 'tv' ? _currentEpisode : 0,
-    );
+    ResolvedMediaStream? resolved;
+    try {
+      resolved = await _resolver.resolve(
+        item: widget.item,
+        season: widget.item.mediaType == 'tv' ? _currentSeason : 0,
+        episode: widget.item.mediaType == 'tv' ? _currentEpisode : 0,
+      );
+    } catch (_) {
+      resolved = null;
+    }
+
+    if (!mounted) return;
 
     if (resolved == null || resolved.selectableSources.isEmpty) {
-      if (mounted) {
-        setState(() {
-          _isResolving = false;
-          _statusMessage = 'No playable stream found for this title right now.';
-        });
-      }
+      setState(() {
+        _isResolving = false;
+        _statusMessage = 'No playable stream found for this title right now.';
+      });
       return;
     }
 
     _availableSources = resolved.selectableSources;
-    _selectedSource = resolved.bestSource ?? _availableSources.first;
+    _selectedSource = resolved.sources.isNotEmpty
+        ? (resolved.selectableSources.isNotEmpty ? resolved.selectableSources.first : resolved.sources.first)
+        : null;
     _availableCaptions = resolved.captions;
-    _selectedCaption = _availableCaptions.isNotEmpty ? _availableCaptions.firstWhere((c) => c.isDefault, orElse: () => _availableCaptions.first) : null;
+    _selectedCaption = _availableCaptions.isEmpty
+        ? null
+        : _availableCaptions.firstWhere((c) => c.isDefault, orElse: () => _availableCaptions.first);
 
     await _initializePlayer(_selectedSource!.url);
   }
@@ -127,18 +147,46 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _statusMessage = 'Buffering stream...';
     });
 
-    _videoPlayerController?.dispose();
+    await _videoPlayerController?.dispose();
+    _videoPlayerController = null;
 
-    // Use required ExoPlayer CDN headers profile
-    _videoPlayerController = VideoPlayerController.networkUrl(
+    final controller = VideoPlayerController.networkUrl(
       Uri.parse(streamUrl),
       httpHeaders: ApiConstants.zarhostingMediaHeaders,
     );
+    _videoPlayerController = controller;
 
-    await _videoPlayerController!.initialize();
+    try {
+      await controller.initialize();
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _isResolving = false;
+          _isPlaying = false;
+          _statusMessage = 'Playback failed. The stream may have expired, try another quality.';
+        });
+      }
+      return;
+    }
 
-    _videoPlayerController!.addListener(_videoListener);
-    await _videoPlayerController!.play();
+    if (!mounted) {
+      await controller.dispose();
+      return;
+    }
+
+    controller.addListener(_videoListener);
+
+    // Resume where this profile left off (unless the episode was finished).
+    final saved = _userState?.progressFor(
+      widget.item,
+      season: _currentSeason,
+      episode: _currentEpisode,
+    );
+    if (saved != null && !saved.isCompleted && saved.positionSeconds > 5) {
+      await controller.seekTo(Duration(seconds: saved.positionSeconds));
+    }
+
+    await controller.play();
 
     _startProgressPeriodicSave();
     _resetOverlayTimer();
@@ -147,15 +195,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
       setState(() {
         _isResolving = false;
         _isPlaying = true;
-        _duration = _videoPlayerController!.value.duration;
+        _duration = controller.value.duration;
       });
     }
   }
 
   void _videoListener() {
-    if (_videoPlayerController == null || !_videoPlayerController!.value.isInitialized) return;
+    final controller = _videoPlayerController;
+    if (controller == null || !controller.value.isInitialized) return;
 
-    final val = _videoPlayerController!.value;
+    final val = controller.value;
     final pos = val.position;
     final dur = val.duration;
 
@@ -220,18 +269,18 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   void _saveProgressNow() {
-    if (_videoPlayerController == null || !_videoPlayerController!.value.isInitialized) return;
-    final pos = _videoPlayerController!.value.position.inSeconds;
-    final dur = _videoPlayerController!.value.duration.inSeconds;
-    if (pos > 0) {
-      Provider.of<UserStateService>(context, listen: false).updateProgress(
-        item: widget.item,
-        season: _currentSeason,
-        episode: _currentEpisode,
-        positionSeconds: pos,
-        durationSeconds: dur,
-      );
-    }
+    final controller = _videoPlayerController;
+    if (controller == null || !controller.value.isInitialized) return;
+    final pos = controller.value.position.inSeconds;
+    final dur = controller.value.duration.inSeconds;
+    if (pos <= 0) return;
+    _userState?.updateProgress(
+      item: widget.item,
+      season: _currentSeason,
+      episode: _currentEpisode,
+      positionSeconds: pos,
+      durationSeconds: dur,
+    );
   }
 
   void _resetOverlayTimer() {
@@ -246,11 +295,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   void _togglePlayPause() {
-    if (_videoPlayerController == null) return;
-    if (_videoPlayerController!.value.isPlaying) {
-      _videoPlayerController!.pause();
+    final controller = _videoPlayerController;
+    if (controller == null) return;
+    if (controller.value.isPlaying) {
+      controller.pause();
     } else {
-      _videoPlayerController!.play();
+      controller.play();
       _resetOverlayTimer();
     }
     setState(() {});
@@ -419,7 +469,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
               const Divider(color: Colors.white24),
               Expanded(
                 child: _seasonEpisodes.isEmpty
-                    ? const Center(child: CircularProgressIndicator(color: Color(0xFFE50914)))
+                    ? const Center(
+                        child: Text(
+                          'No episode data available.',
+                          style: TextStyle(color: Colors.white54),
+                        ),
+                      )
                     : ListView.separated(
                         itemCount: _seasonEpisodes.length,
                         separatorBuilder: (_, __) => const Divider(color: Colors.white12),
@@ -526,12 +581,36 @@ class _PlayerScreenState extends State<PlayerScreen> {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  const CircularProgressIndicator(color: Color(0xFFE50914)),
+                  if (_isResolving)
+                    const CircularProgressIndicator(color: Color(0xFFE50914))
+                  else
+                    const Icon(Icons.videocam_off_outlined, color: Colors.white54, size: 48),
                   const SizedBox(height: 16),
-                  Text(
-                    _statusMessage,
-                    style: const TextStyle(color: Colors.white, fontSize: 13),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 32),
+                    child: Text(
+                      _statusMessage,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(color: Colors.white, fontSize: 13),
+                    ),
                   ),
+                  if (!_isResolving) ...[
+                    const SizedBox(height: 16),
+                    ElevatedButton.icon(
+                      onPressed: _resolveAndPlay,
+                      icon: const Icon(Icons.refresh, size: 18),
+                      label: const Text('Retry'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFFE50914),
+                        foregroundColor: Colors.white,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    TextButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      child: const Text('Back', style: TextStyle(color: Colors.white70)),
+                    ),
+                  ],
                 ],
               ),
             ),
@@ -599,7 +678,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
               child: CircularProgressIndicator(color: Color(0xFFE50914)),
             ),
 
-          // 5. Netflix Player HUD Overlay
+          // 5. Cinema Player HUD Overlay
           if (_showControls && !_isResolving)
             Container(
               decoration: const BoxDecoration(
@@ -708,7 +787,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
               ),
             ),
 
-          // 6. Next Episode Countdown Overlay (Netflix Binge prompt)
+          // 6. Next Episode Countdown Overlay (binge prompt)
           if (_showNextEpisodeCountdown)
             Positioned(
               bottom: 80,
@@ -735,6 +814,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       ),
                       onPressed: _playNextEpisode,
                       child: const Text('Play Next', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, color: Colors.white70, size: 18),
+                      onPressed: () {
+                        _countdownTimer?.cancel();
+                        setState(() => _showNextEpisodeCountdown = false);
+                      },
                     ),
                   ],
                 ),

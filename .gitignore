@@ -22,6 +22,7 @@ build/
 app/build/
 
 # Flutter repo
+.dart_tool/
 .flutter-plugins
 .flutter-plugins-dependencies
 .packages

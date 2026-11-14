@@ -3,7 +3,6 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/media_item.dart';
 import '../models/user_profile.dart';
-import 'supabase_service.dart';
 
 class WatchProgress {
   final MediaItem item;
@@ -25,6 +24,8 @@ class WatchProgress {
   double get progressFraction => durationSeconds > 0
       ? (positionSeconds / durationSeconds).clamp(0.0, 1.0)
       : 0.0;
+
+  bool get isCompleted => progressFraction >= 0.95;
 
   Map<String, dynamic> toJson() => {
     'item': {
@@ -48,18 +49,22 @@ class WatchProgress {
 
   factory WatchProgress.fromJson(Map<String, dynamic> json) {
     return WatchProgress(
-      item: MediaItem.fromJson(json['item']),
+      item: MediaItem.fromJson(Map<String, dynamic>.from(json['item'] as Map)),
       season: json['season'] as int? ?? 1,
       episode: json['episode'] as int? ?? 1,
       positionSeconds: json['positionSeconds'] as int? ?? 0,
       durationSeconds: json['durationSeconds'] as int? ?? 0,
-      lastWatched: DateTime.tryParse(json['lastWatched'] ?? '') ?? DateTime.now(),
+      lastWatched: DateTime.tryParse(json['lastWatched']?.toString() ?? '') ?? DateTime.now(),
     );
   }
 }
 
+/// All viewer state (profiles, My List, watch progress) lives in local storage.
+/// No backend is contacted; every mutation is written straight to
+/// SharedPreferences and the in-memory lists.
 class UserStateService extends ChangeNotifier {
-  final SupabaseService _supabase = SupabaseService();
+  static const int maxProfiles = 5;
+
   SharedPreferences? _prefs;
 
   List<UserProfile> _profiles = UserProfile.defaultProfiles;
@@ -75,52 +80,53 @@ class UserStateService extends ChangeNotifier {
   Future<void> init() async {
     _prefs = await SharedPreferences.getInstance();
     _loadFromLocal();
-    _syncWithCloud();
   }
 
   void _loadFromLocal() {
-    if (_prefs == null) return;
+    final prefs = _prefs;
+    if (prefs == null) return;
 
-    // Load profiles
-    final rawProfiles = _prefs!.getString('flix_profiles');
+    final rawProfiles = prefs.getString('flix_profiles');
     if (rawProfiles != null) {
       try {
-        final list = (json.decode(rawProfiles) as List).map((p) => UserProfile.fromJson(p)).toList();
+        final list = (json.decode(rawProfiles) as List)
+            .map((p) => UserProfile.fromJson(Map<String, dynamic>.from(p as Map)))
+            .toList();
         if (list.isNotEmpty) _profiles = list;
-      } catch (_) {}
+      } catch (_) {
+        _profiles = UserProfile.defaultProfiles;
+      }
     }
 
-    final activeId = _prefs!.getString('flix_active_profile_id');
+    final activeId = prefs.getString('flix_active_profile_id');
     _currentProfile = _profiles.firstWhere(
       (p) => p.id == activeId,
       orElse: () => _profiles.first,
     );
 
-    // Load active profile data
     _loadProfileData();
   }
 
   void _loadProfileData() {
-    if (_prefs == null) return;
+    final prefs = _prefs;
+    if (prefs == null) return;
     final pid = _currentProfile.id;
 
-    // My List
-    final rawMyList = _prefs!.getString('flix_my_list_$pid');
+    final rawMyList = prefs.getString('flix_my_list_$pid');
     _myList.clear();
     if (rawMyList != null) {
       try {
-        final items = (json.decode(rawMyList) as List).map((m) => MediaItem.fromJson(m)).toList();
-        _myList.addAll(items);
+        _myList.addAll((json.decode(rawMyList) as List)
+            .map((m) => MediaItem.fromJson(Map<String, dynamic>.from(m as Map))));
       } catch (_) {}
     }
 
-    // Continue Watching
-    final rawProgress = _prefs!.getString('flix_progress_$pid');
+    final rawProgress = prefs.getString('flix_progress_$pid');
     _continueWatching.clear();
     if (rawProgress != null) {
       try {
-        final items = (json.decode(rawProgress) as List).map((w) => WatchProgress.fromJson(w)).toList();
-        _continueWatching.addAll(items);
+        _continueWatching.addAll((json.decode(rawProgress) as List)
+            .map((w) => WatchProgress.fromJson(Map<String, dynamic>.from(w as Map))));
       } catch (_) {}
     }
 
@@ -128,20 +134,22 @@ class UserStateService extends ChangeNotifier {
   }
 
   Future<void> _saveToLocal() async {
-    if (_prefs == null) return;
+    final prefs = _prefs;
+    if (prefs == null) return;
     final pid = _currentProfile.id;
 
-    await _prefs!.setString(
+    await prefs.setString(
       'flix_profiles',
       json.encode(_profiles.map((p) => p.toJson()).toList()),
     );
-    await _prefs!.setString('flix_active_profile_id', pid);
+    await prefs.setString('flix_active_profile_id', pid);
 
-    await _prefs!.setString(
+    await prefs.setString(
       'flix_my_list_$pid',
       json.encode(_myList.map((m) => {
         'id': m.id,
         'title': m.title,
+        'original_title': m.originalTitle,
         'overview': m.overview,
         'poster_path': m.posterPath,
         'backdrop_path': m.backdropPath,
@@ -152,21 +160,10 @@ class UserStateService extends ChangeNotifier {
       }).toList()),
     );
 
-    await _prefs!.setString(
+    await prefs.setString(
       'flix_progress_$pid',
       json.encode(_continueWatching.map((w) => w.toJson()).toList()),
     );
-  }
-
-  Future<void> _syncWithCloud() async {
-    try {
-      final cloudProfiles = await _supabase.fetchProfiles();
-      if (cloudProfiles.isNotEmpty) {
-        _profiles = cloudProfiles;
-        _saveToLocal();
-        notifyListeners();
-      }
-    } catch (_) {}
   }
 
   void setProfile(UserProfile profile) {
@@ -175,13 +172,15 @@ class UserStateService extends ChangeNotifier {
     _loadProfileData();
   }
 
+  bool get canAddProfile => _profiles.length < maxProfiles;
+
   Future<bool> addProfile({
     required String name,
     required String avatarUrl,
     bool isKids = false,
     String? pin,
   }) async {
-    if (_profiles.length >= 5) return false;
+    if (!canAddProfile) return false;
 
     final newProfile = UserProfile(
       id: DateTime.now().millisecondsSinceEpoch.toString(),
@@ -193,20 +192,21 @@ class UserStateService extends ChangeNotifier {
 
     _profiles.add(newProfile);
     await _saveToLocal();
-    _supabase.saveProfile(newProfile);
     notifyListeners();
     return true;
   }
 
   Future<void> deleteProfile(String profileId) async {
     if (_profiles.length <= 1) return;
+    final wasActive = _currentProfile.id == profileId;
     _profiles.removeWhere((p) => p.id == profileId);
-    if (_currentProfile.id == profileId) {
-      _currentProfile = _profiles.first;
-    }
+    if (wasActive) _currentProfile = _profiles.first;
     await _saveToLocal();
-    _supabase.deleteProfile(profileId);
-    _loadProfileData();
+    if (wasActive) {
+      _loadProfileData();
+    } else {
+      notifyListeners();
+    }
   }
 
   bool isInMyList(MediaItem item) {
@@ -214,18 +214,12 @@ class UserStateService extends ChangeNotifier {
   }
 
   void toggleMyList(MediaItem item) {
-    final adding = !isInMyList(item);
-    if (adding) {
-      _myList.insert(0, item);
-    } else {
+    if (isInMyList(item)) {
       _myList.removeWhere((m) => m.id == item.id && m.mediaType == item.mediaType);
+    } else {
+      _myList.insert(0, item);
     }
     _saveToLocal();
-    _supabase.syncWatchlistToggle(
-      profileId: _currentProfile.id,
-      item: item,
-      isAdding: adding,
-    );
     notifyListeners();
   }
 
@@ -237,7 +231,9 @@ class UserStateService extends ChangeNotifier {
     required int positionSeconds,
     required int durationSeconds,
   }) {
-    _continueWatching.removeWhere((w) => w.item.id == item.id);
+    _continueWatching.removeWhere(
+      (w) => w.item.id == item.id && w.season == season && w.episode == episode,
+    );
     _continueWatching.insert(
       0,
       WatchProgress(
@@ -249,15 +245,18 @@ class UserStateService extends ChangeNotifier {
       ),
     );
     _saveToLocal();
-    _supabase.syncWatchProgress(
-      profileId: _currentProfile.id,
-      item: item,
-      positionSeconds: positionSeconds,
-      durationSeconds: durationSeconds,
-      season: season,
-      episode: episode,
-      episodeTitle: episodeTitle,
-    );
     notifyListeners();
+  }
+
+  WatchProgress? progressFor(MediaItem item, {int season = 1, int episode = 1}) {
+    for (final w in _continueWatching) {
+      if (w.item.id == item.id && w.item.mediaType == item.mediaType) {
+        if (item.mediaType == 'tv' && (w.season != season || w.episode != episode)) {
+          continue;
+        }
+        return w;
+      }
+    }
+    return null;
   }
 }

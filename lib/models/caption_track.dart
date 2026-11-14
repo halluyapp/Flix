@@ -17,7 +17,7 @@ class CaptionTrack {
     final lang = (json['language'] ?? json['lang'] ?? 'en').toString();
     final name = (json['label'] ?? json['languageName'] ?? json['lanName'] ?? json['name'] ?? lang).toString();
     final url = (json['url'] ?? json['subtitleUrl'] ?? '').toString();
-    final id = (json['id'] ?? '$lang-\${url.hashCode}').toString();
+    final id = (json['id'] ?? '$lang-${url.hashCode}').toString();
     final isDef = json['is_default'] == true || json['isDefault'] == true || json['default'] == true;
 
     return CaptionTrack(

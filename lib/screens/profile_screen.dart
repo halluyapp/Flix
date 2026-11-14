@@ -30,7 +30,7 @@ class ProfileScreen extends StatelessWidget {
         return AlertDialog(
           backgroundColor: const Color(0xFF1A1A1A),
           title: Text(
-            'Enter PIN for \${profile.name}',
+            'Enter PIN for ${profile.name}',
             style: const TextStyle(color: Colors.white, fontSize: 16),
           ),
           content: TextField(
@@ -174,17 +174,13 @@ class ProfileScreen extends StatelessWidget {
         backgroundColor: Colors.transparent,
         elevation: 0,
         centerTitle: true,
-        title: Image.network(
-          'https://upload.wikimedia.org/wikipedia/commons/0/08/Netflix_2015_logo.svg',
-          height: 28,
-          errorBuilder: (_, __, ___) => const Text(
-            'FLIX',
-            style: TextStyle(
-              color: Color(0xFFE50914),
-              fontSize: 24,
-              fontWeight: FontWeight.w900,
-              letterSpacing: 2,
-            ),
+        title: const Text(
+          'FLIX',
+          style: TextStyle(
+            color: Color(0xFFE50914),
+            fontSize: 24,
+            fontWeight: FontWeight.w900,
+            letterSpacing: 2,
           ),
         ),
       ),
