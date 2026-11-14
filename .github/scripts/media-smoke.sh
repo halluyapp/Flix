@@ -125,7 +125,8 @@ adb shell input tap "$((width / 2))" "$((height * 7 / 100))"
 adb shell input text 'Nosferatu'
 adb shell input keyevent KEYCODE_BACK
 sleep 10
-dump_ui artifacts/emulator/movie-search-window.xml
+dump_ui
+cp "$ui_file" artifacts/emulator/movie-search-window.xml
 adb exec-out screencap -p > artifacts/screenshots/flix-movie-search.png
 
 coordinates=$(second_result_coordinates) || {
