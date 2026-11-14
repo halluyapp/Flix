@@ -105,7 +105,7 @@ class DownloadService extends ChangeNotifier {
     final stamp = DateTime.now().millisecondsSinceEpoch;
     final episodePart = item.mediaType == 'tv' ? '_S${season}E$episode' : '';
     final fileBase =
-        '${_safeName(item.title)}_${item.id}$episodePart_${source.qualityValue}p_$stamp';
+        '${_safeName(item.title)}_${item.id}${episodePart}_${source.qualityValue}p_$stamp';
     final videoName = '$fileBase.mp4';
     final localSubtitles = <OfflineSubtitle>[];
 

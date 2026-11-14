@@ -70,9 +70,8 @@ class StreamSource {
       };
       // Zarhosting's legacy bare `size` is reported in MB when small; values
       // beyond this threshold are treated as byte counts.
-      final resolvedMultiplier = multiplier == 0
-          ? (amount < 10_000_000 ? 1024 * 1024 : 1)
-          : multiplier;
+      final resolvedMultiplier =
+          multiplier == 0 ? (amount < 10000000 ? 1024 * 1024 : 1) : multiplier;
       return (amount * resolvedMultiplier).round().clamp(0, 1 << 62).toInt();
     }
     return _parseInt(raw).clamp(0, 1 << 62).toInt();

@@ -239,7 +239,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
       }
     }
 
-    if (controller == null || !controller.value.isInitialized) {
+    final activeController = controller;
+    if (activeController == null || !activeController.value.isInitialized) {
       if (mounted) {
         setState(() {
           _isResolving = false;
@@ -252,11 +253,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
 
     if (!mounted) {
-      await controller.dispose();
+      await activeController.dispose();
       return false;
     }
 
-    controller.addListener(_videoListener);
+    activeController.addListener(_videoListener);
 
     // Resume where this profile left off (unless the episode was finished).
     final saved = _userState?.progressFor(
@@ -269,14 +270,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
             ? Duration(seconds: saved.positionSeconds)
             : Duration.zero);
     if (resumePosition > const Duration(seconds: 1)) {
-      await controller.seekTo(resumePosition);
+      await activeController.seekTo(resumePosition);
     }
 
     try {
-      await controller.play();
+      await activeController.play();
     } catch (error) {
       debugPrint('Flix could not start playback: $error');
-      await controller.dispose();
+      await activeController.dispose();
       if (mounted) setState(() => _videoPlayerController = null);
       return false;
     }
@@ -288,7 +289,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       setState(() {
         _isResolving = false;
         _isPlaying = true;
-        _duration = controller.value.duration;
+        _duration = activeController.value.duration;
       });
     }
     return true;
