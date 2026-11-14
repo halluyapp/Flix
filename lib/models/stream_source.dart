@@ -23,65 +23,149 @@ class StreamSource {
     if (value == null) return fallback;
     if (value is int) return value;
     if (value is num) return value.toInt();
-    if (value is String) return int.tryParse(value) ?? fallback;
-    return fallback;
+    final match = RegExp(r'-?\d+(?:\.\d+)?').firstMatch(value.toString());
+    if (match == null) return fallback;
+    return double.tryParse(match.group(0)!)?.round() ?? fallback;
+  }
+
+  static int _parseSizeBytes(Map<String, dynamic> json) {
+    for (final key in [
+      'size_bytes',
+      'sizeBytes',
+      'file_size_bytes',
+      'filesize_bytes'
+    ]) {
+      final value = json[key];
+      if (value != null) return _parseInt(value).clamp(0, 1 << 62).toInt();
+    }
+
+    for (final entry in [
+      ('size_gb', 1024 * 1024 * 1024),
+      ('size_mb', 1024 * 1024),
+      ('size_kb', 1024),
+    ]) {
+      final value = json[entry.$1];
+      if (value != null)
+        return (_parseInt(value) * entry.$2).clamp(0, 1 << 62).toInt();
+    }
+
+    final raw = json['size'] ??
+        json['file_size'] ??
+        json['fileSize'] ??
+        json['filesize'];
+    if (raw == null) return 0;
+    final text = raw.toString().trim().toLowerCase().replaceAll(',', '');
+    final match =
+        RegExp(r'^(\d+(?:\.\d+)?)\s*(b|bytes?|kb|kib|mb|mib|gb|gib)?$')
+            .firstMatch(text);
+    if (match != null) {
+      final amount = double.tryParse(match.group(1)!) ?? 0;
+      final unit = match.group(2) ?? '';
+      final multiplier = switch (unit) {
+        'gb' || 'gib' => 1024 * 1024 * 1024,
+        'mb' || 'mib' => 1024 * 1024,
+        'kb' || 'kib' => 1024,
+        'b' || 'byte' || 'bytes' => 1,
+        _ => 0,
+      };
+      // Zarhosting's legacy bare `size` is reported in MB when small; values
+      // beyond this threshold are treated as byte counts.
+      final resolvedMultiplier = multiplier == 0
+          ? (amount < 10_000_000 ? 1024 * 1024 : 1)
+          : multiplier;
+      return (amount * resolvedMultiplier).round().clamp(0, 1 << 62).toInt();
+    }
+    return _parseInt(raw).clamp(0, 1 << 62).toInt();
   }
 
   factory StreamSource.fromJson(Map<String, dynamic> json) {
-    final rawUrl = json['url'] ?? json['playback_url'] ?? json['file'] ?? json['stream_url'] ?? '';
-    final url = rawUrl.toString();
+    final rawUrl = json['url'] ??
+        json['playback_url'] ??
+        json['file'] ??
+        json['stream_url'] ??
+        '';
+    final url = rawUrl.toString().trim();
 
-    final res = (json['resolution'] ?? json['quality'] ?? json['label'] ?? '720p').toString();
-    final qualityMatch = RegExp(r'\d{3,4}').firstMatch(res);
-    final qualityVal = qualityMatch != null ? int.tryParse(qualityMatch.group(0)!) ?? 720 : 720;
+    final resolution =
+        (json['resolution'] ?? json['quality'] ?? json['label'] ?? '720p')
+            .toString();
+    final qualityMatch = RegExp(r'\d{3,4}').firstMatch(resolution);
+    final qualityValue = qualityMatch == null
+        ? 720
+        : int.tryParse(qualityMatch.group(0)!) ?? 720;
 
-    final format = (json['format'] ?? (url.contains('.m3u8') ? 'HLS' : (url.contains('.mpd') ? 'DASH' : 'MP4'))).toString();
-    final dur = _parseInt(json['duration'] ?? json['duration_sec'] ?? json['durationSeconds']);
-    final size = _parseInt(json['size_bytes'] ?? json['size'] ?? json['sizeBytes']);
+    final rawFormat = (json['format'] ?? '').toString().trim();
+    final lowerUrl = url.toLowerCase();
+    final format = rawFormat.isNotEmpty
+        ? rawFormat.toUpperCase()
+        : lowerUrl.contains('.m3u8')
+            ? 'HLS'
+            : lowerUrl.contains('.mpd')
+                ? 'DASH'
+                : 'MP4';
 
-    final sourceLabel = (json['source'] ?? json['source_label'] ?? json['sourceLabel'] ?? '').toString().toLowerCase();
-    
-    // Preview heuristics conforming to Hallyu-TV spec:
-    // Labels containing preview/trailer/sample/clip, or positive duration under 180 seconds.
-    final looksPreview = sourceLabel.contains('preview') ||
-        sourceLabel.contains('trailer') ||
-        sourceLabel.contains('sample') ||
-        sourceLabel.contains('clip') ||
-        sourceLabel.contains('mobile native');
-    final isPreview = looksPreview || (dur > 0 && dur < 180);
+    final duration = _parseInt(json['duration_seconds'] ??
+        json['duration_sec'] ??
+        json['durationSeconds'] ??
+        json['duration']);
+    final sizeBytes = _parseSizeBytes(json);
+    final sourceLabel = (json['source'] ??
+            json['source_label'] ??
+            json['sourceLabel'] ??
+            json['source_name'] ??
+            '')
+        .toString()
+        .toLowerCase();
+    final previewMetadata = '$sourceLabel $resolution'.toLowerCase();
+    final explicitPreview =
+        json['is_preview'] == true || json['isPreview'] == true;
+    final isPreview = explicitPreview ||
+        [
+          'preview',
+          'trailer',
+          'sample',
+          'clip',
+          'teaser',
+          'mobile native',
+        ].any(previewMetadata.contains);
 
-    // Verified full-length: duration > 300s or size > 50MB
-    bool? verifiedFull;
+    final explicitFullLength =
+        json['verified_full_length'] ?? json['verifiedFullLength'];
+    bool? verifiedFullLength;
     if (!isPreview) {
-      if (dur > 300 || size > 50 * 1024 * 1024) {
-        verifiedFull = true;
-      } else if (dur == 0 && size == 0) {
-        verifiedFull = null; // Unverified but selectable
-      } else {
-        verifiedFull = false;
+      if (explicitFullLength is bool) {
+        verifiedFullLength = explicitFullLength;
+      } else if (duration >= 300 || sizeBytes >= 50 * 1024 * 1024) {
+        verifiedFullLength = true;
       }
     }
 
     return StreamSource(
       url: url,
-      resolution: res,
-      qualityValue: qualityVal,
+      resolution: resolution,
+      qualityValue: qualityValue,
       format: format,
-      sizeBytes: size,
-      durationSeconds: dur,
+      sizeBytes: sizeBytes,
+      durationSeconds: duration,
       isPreview: isPreview,
-      verifiedFullLength: verifiedFull,
+      verifiedFullLength: verifiedFullLength,
     );
   }
 
+  bool get isDownloadable =>
+      !isPreview &&
+      verifiedFullLength != false &&
+      format.toUpperCase() == 'MP4' &&
+      url.startsWith('https://');
+
   Map<String, dynamic> toJson() => {
-    'url': url,
-    'resolution': resolution,
-    'qualityValue': qualityValue,
-    'format': format,
-    'sizeBytes': sizeBytes,
-    'durationSeconds': durationSeconds,
-    'isPreview': isPreview,
-    'verifiedFullLength': verifiedFullLength,
-  };
+        'url': url,
+        'resolution': resolution,
+        'qualityValue': qualityValue,
+        'format': format,
+        'sizeBytes': sizeBytes,
+        'durationSeconds': durationSeconds,
+        'isPreview': isPreview,
+        'verifiedFullLength': verifiedFullLength,
+      };
 }

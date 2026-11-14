@@ -6,6 +6,7 @@ import '../models/episode.dart';
 import '../services/tmdb_service.dart';
 import '../services/user_state_service.dart';
 import '../widgets/content_rail.dart';
+import 'download_options_sheet.dart';
 import 'player_screen.dart';
 
 class DetailScreen extends StatefulWidget {
@@ -17,7 +18,8 @@ class DetailScreen extends StatefulWidget {
   State<DetailScreen> createState() => _DetailScreenState();
 }
 
-class _DetailScreenState extends State<DetailScreen> with SingleTickerProviderStateMixin {
+class _DetailScreenState extends State<DetailScreen>
+    with SingleTickerProviderStateMixin {
   final TmdbService _tmdbService = TmdbService();
   late TabController _tabController;
   List<Episode> _episodes = [];
@@ -28,7 +30,8 @@ class _DetailScreenState extends State<DetailScreen> with SingleTickerProviderSt
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: widget.item.mediaType == 'tv' ? 2 : 1, vsync: this);
+    _tabController = TabController(
+        length: widget.item.mediaType == 'tv' ? 2 : 1, vsync: this);
     _loadData();
   }
 
@@ -58,6 +61,28 @@ class _DetailScreenState extends State<DetailScreen> with SingleTickerProviderSt
       }
     } catch (_) {
       if (mounted) setState(() => _isLoadingEpisodes = false);
+    }
+  }
+
+  Future<void> _openDownloadOptions(
+      {int season = 0, int episode = 0, String episodeTitle = ''}) async {
+    final started = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => DownloadOptionsSheet(
+        item: widget.item,
+        season: season,
+        episode: episode,
+        episodeTitle: episodeTitle,
+      ),
+    );
+    if (started == true && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content:
+                Text('Added to Downloads. Find it in My Flix → Downloads.')),
+      );
     }
   }
 
@@ -109,7 +134,8 @@ class _DetailScreenState extends State<DetailScreen> with SingleTickerProviderSt
                 GestureDetector(
                   onTap: () {
                     Navigator.of(context).push(
-                      MaterialPageRoute(builder: (_) => PlayerScreen(item: widget.item)),
+                      MaterialPageRoute(
+                          builder: (_) => PlayerScreen(item: widget.item)),
                     );
                   },
                   child: Container(
@@ -119,7 +145,8 @@ class _DetailScreenState extends State<DetailScreen> with SingleTickerProviderSt
                       shape: BoxShape.circle,
                       border: Border.all(color: Colors.white, width: 2),
                     ),
-                    child: const Icon(Icons.play_arrow, color: Colors.white, size: 36),
+                    child: const Icon(Icons.play_arrow,
+                        color: Colors.white, size: 36),
                   ),
                 ),
               ],
@@ -151,25 +178,32 @@ class _DetailScreenState extends State<DetailScreen> with SingleTickerProviderSt
                       const SizedBox(width: 10),
                       Text(
                         '${widget.item.releaseYear}',
-                        style: const TextStyle(color: Colors.white70, fontSize: 13),
+                        style: const TextStyle(
+                            color: Colors.white70, fontSize: 13),
                       ),
                       const SizedBox(width: 10),
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 5, vertical: 1),
                         decoration: BoxDecoration(
                           color: const Color(0xFF333333),
                           borderRadius: BorderRadius.circular(2),
                         ),
-                        child: const Text('18+', style: TextStyle(color: Colors.white, fontSize: 10)),
+                        child: const Text('18+',
+                            style:
+                                TextStyle(color: Colors.white, fontSize: 10)),
                       ),
                       const SizedBox(width: 8),
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 5, vertical: 1),
                         decoration: BoxDecoration(
                           color: const Color(0xFF333333),
                           borderRadius: BorderRadius.circular(2),
                         ),
-                        child: const Text('Ultra HD 4K', style: TextStyle(color: Colors.white, fontSize: 10)),
+                        child: const Text('Ultra HD 4K',
+                            style:
+                                TextStyle(color: Colors.white, fontSize: 10)),
                       ),
                     ],
                   ),
@@ -181,17 +215,23 @@ class _DetailScreenState extends State<DetailScreen> with SingleTickerProviderSt
                     child: ElevatedButton.icon(
                       onPressed: () {
                         Navigator.of(context).push(
-                          MaterialPageRoute(builder: (_) => PlayerScreen(item: widget.item)),
+                          MaterialPageRoute(
+                              builder: (_) => PlayerScreen(item: widget.item)),
                         );
                       },
-                      icon: const Icon(Icons.play_arrow, color: Colors.black, size: 26),
+                      icon: const Icon(Icons.play_arrow,
+                          color: Colors.black, size: 26),
                       label: const Text(
                         'Play',
-                        style: TextStyle(color: Colors.black, fontSize: 16, fontWeight: FontWeight.bold),
+                        style: TextStyle(
+                            color: Colors.black,
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold),
                       ),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: Colors.white,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(4)),
                       ),
                     ),
                   ),
@@ -201,26 +241,40 @@ class _DetailScreenState extends State<DetailScreen> with SingleTickerProviderSt
                     width: double.infinity,
                     height: 44,
                     child: ElevatedButton.icon(
-                      onPressed: () {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Download started...')),
-                        );
-                      },
-                      icon: const Icon(Icons.download, color: Colors.white, size: 22),
+                      onPressed: () => _openDownloadOptions(
+                        season:
+                            widget.item.mediaType == 'tv' ? _selectedSeason : 0,
+                        episode: widget.item.mediaType == 'tv'
+                            ? (_episodes.isNotEmpty
+                                ? _episodes.first.episodeNumber
+                                : 1)
+                            : 0,
+                        episodeTitle: widget.item.mediaType == 'tv' &&
+                                _episodes.isNotEmpty
+                            ? _episodes.first.name
+                            : '',
+                      ),
+                      icon: const Icon(Icons.download,
+                          color: Colors.white, size: 22),
                       label: const Text(
                         'Download',
-                        style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w600),
+                        style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600),
                       ),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: const Color(0xFF262626),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(4)),
                       ),
                     ),
                   ),
                   const SizedBox(height: 14),
                   Text(
                     widget.item.overview,
-                    style: const TextStyle(color: Colors.white, fontSize: 13, height: 1.4),
+                    style: const TextStyle(
+                        color: Colors.white, fontSize: 13, height: 1.4),
                   ),
                   const SizedBox(height: 18),
                   // Action Row
@@ -231,24 +285,32 @@ class _DetailScreenState extends State<DetailScreen> with SingleTickerProviderSt
                         onTap: () => userState.toggleMyList(widget.item),
                         child: Column(
                           children: [
-                            Icon(inMyList ? Icons.check : Icons.add, color: Colors.white, size: 26),
+                            Icon(inMyList ? Icons.check : Icons.add,
+                                color: Colors.white, size: 26),
                             const SizedBox(height: 4),
-                            Text(inMyList ? 'In List' : 'My List', style: const TextStyle(color: Colors.white70, fontSize: 11)),
+                            Text(inMyList ? 'In List' : 'My List',
+                                style: const TextStyle(
+                                    color: Colors.white70, fontSize: 11)),
                           ],
                         ),
                       ),
                       const Column(
                         children: [
-                          Icon(Icons.thumb_up_alt_outlined, color: Colors.white, size: 24),
+                          Icon(Icons.thumb_up_alt_outlined,
+                              color: Colors.white, size: 24),
                           SizedBox(height: 4),
-                          Text('Rate', style: TextStyle(color: Colors.white70, fontSize: 11)),
+                          Text('Rate',
+                              style: TextStyle(
+                                  color: Colors.white70, fontSize: 11)),
                         ],
                       ),
                       const Column(
                         children: [
                           Icon(Icons.share, color: Colors.white, size: 24),
                           SizedBox(height: 4),
-                          Text('Share', style: TextStyle(color: Colors.white70, fontSize: 11)),
+                          Text('Share',
+                              style: TextStyle(
+                                  color: Colors.white70, fontSize: 11)),
                         ],
                       ),
                     ],
@@ -267,8 +329,12 @@ class _DetailScreenState extends State<DetailScreen> with SingleTickerProviderSt
                       value: _selectedSeason,
                       dropdownColor: const Color(0xFF1F1F1F),
                       underline: const SizedBox.shrink(),
-                      icon: const Icon(Icons.arrow_drop_down, color: Colors.white),
-                      style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+                      icon: const Icon(Icons.arrow_drop_down,
+                          color: Colors.white),
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold),
                       items: List.generate(
                         5,
                         (index) => DropdownMenuItem(
@@ -284,7 +350,11 @@ class _DetailScreenState extends State<DetailScreen> with SingleTickerProviderSt
                 ),
               ),
               if (_isLoadingEpisodes)
-                const Center(child: Padding(padding: EdgeInsets.all(20), child: CircularProgressIndicator(color: Color(0xFFE50914))))
+                const Center(
+                    child: Padding(
+                        padding: EdgeInsets.all(20),
+                        child: CircularProgressIndicator(
+                            color: Color(0xFFE50914))))
               else
                 ListView.builder(
                   shrinkWrap: true,
@@ -293,7 +363,8 @@ class _DetailScreenState extends State<DetailScreen> with SingleTickerProviderSt
                   itemBuilder: (context, index) {
                     final ep = _episodes[index];
                     return ListTile(
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                      contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 6),
                       leading: ClipRRect(
                         borderRadius: BorderRadius.circular(4),
                         child: CachedNetworkImage(
@@ -305,15 +376,24 @@ class _DetailScreenState extends State<DetailScreen> with SingleTickerProviderSt
                       ),
                       title: Text(
                         '${ep.episodeNumber}. ${ep.name}',
-                        style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold),
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 13,
+                            fontWeight: FontWeight.bold),
                       ),
                       subtitle: Text(
                         '${ep.runtime}m',
-                        style: const TextStyle(color: Colors.white54, fontSize: 11),
+                        style: const TextStyle(
+                            color: Colors.white54, fontSize: 11),
                       ),
                       trailing: IconButton(
-                        icon: const Icon(Icons.download_for_offline_outlined, color: Colors.white70),
-                        onPressed: () {},
+                        icon: const Icon(Icons.download_for_offline_outlined,
+                            color: Colors.white70),
+                        onPressed: () => _openDownloadOptions(
+                          season: ep.seasonNumber,
+                          episode: ep.episodeNumber,
+                          episodeTitle: ep.name,
+                        ),
                       ),
                       onTap: () {
                         Navigator.of(context).push(

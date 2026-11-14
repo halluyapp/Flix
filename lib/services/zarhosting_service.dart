@@ -5,6 +5,15 @@ import '../models/stream_source.dart';
 import '../models/caption_track.dart';
 import '../models/provider_clip.dart';
 
+class ProviderException implements Exception {
+  final String message;
+
+  const ProviderException(this.message);
+
+  @override
+  String toString() => message;
+}
+
 class ZarhostingTarget {
   final String subjectId;
   final String detailPath;
@@ -28,6 +37,31 @@ class ZarhostingService {
     'animation short',
     'short film',
   ];
+
+  Future<http.Response> _getProvider(Uri uri,
+      {required Duration timeout}) async {
+    Object? lastError;
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        final response = await http
+            .get(uri, headers: ApiConstants.zarhostingApiHeaders)
+            .timeout(timeout);
+        final transient = response.statusCode == 408 ||
+            response.statusCode == 429 ||
+            response.statusCode >= 500;
+        if (!transient || attempt == 2) return response;
+      } catch (error) {
+        lastError = error;
+        if (attempt == 2) {
+          throw const ProviderException(
+              'The streaming service could not be reached. Please try again.');
+        }
+      }
+      await Future<void>.delayed(Duration(milliseconds: 300 * (attempt + 1)));
+    }
+    throw ProviderException(
+        'The streaming service could not be reached${lastError == null ? '.' : ': $lastError'}');
+  }
 
   /// Searches the provider catalogue and keeps only playable movie records
   /// whose metadata explicitly includes the Short genre. A query match alone
@@ -54,7 +88,9 @@ class ZarhostingService {
 
     if (discovered.length < 18) {
       final nextPages = <Future<_ProviderSearchPage>>[];
-      for (var index = 0; index < firstPages.length && nextPages.length < 4; index++) {
+      for (var index = 0;
+          index < firstPages.length && nextPages.length < 4;
+          index++) {
         if (firstPages[index].hasMore) {
           nextPages.add(_searchCatalog(_shortFilmSearches[index], page: 2));
         }
@@ -74,7 +110,8 @@ class ZarhostingService {
     return clips.take(48).toList();
   }
 
-  Future<_ProviderSearchPage> _searchCatalog(String query, {required int page}) async {
+  Future<_ProviderSearchPage> _searchCatalog(String query,
+      {required int page}) async {
     try {
       final uri = Uri.parse('${ApiConstants.zarhostingBaseUrl}/search').replace(
         queryParameters: {
@@ -83,24 +120,26 @@ class ZarhostingService {
           'per_page': '30',
         },
       );
-      final response = await http
-          .get(uri, headers: ApiConstants.zarhostingApiHeaders)
-          .timeout(const Duration(seconds: 14));
+      final response =
+          await _getProvider(uri, timeout: const Duration(seconds: 14));
       if (response.statusCode != 200) return const _ProviderSearchPage.empty();
 
       final decoded = json.decode(response.body);
-      final root = decoded is Map && decoded['data'] is Map ? decoded['data'] : decoded;
+      final root =
+          decoded is Map && decoded['data'] is Map ? decoded['data'] : decoded;
       final rawItems = root is Map
           ? (root['items'] ?? root['results'] ?? root['data'] ?? const [])
           : root;
       final items = rawItems is List
           ? rawItems
               .whereType<Map>()
-              .map((raw) => ProviderClip.fromProviderJson(Map<String, dynamic>.from(raw)))
+              .map((raw) =>
+                  ProviderClip.fromProviderJson(Map<String, dynamic>.from(raw)))
               .whereType<ProviderClip>()
               .toList()
           : <ProviderClip>[];
-      final hasMore = root is Map && (root['has_more'] == true || root['hasMore'] == true);
+      final hasMore =
+          root is Map && (root['has_more'] == true || root['hasMore'] == true);
       return _ProviderSearchPage(items: items, hasMore: hasMore);
     } catch (_) {
       return const _ProviderSearchPage.empty();
@@ -123,7 +162,9 @@ class ZarhostingService {
   static String _comparisonTitle(String raw) {
     var t = raw.replaceAll(RegExp(r'\[(?:[^\]]*)\]'), ' ');
     t = t.replaceAll(RegExp(r'\((?:[^)]*)\)'), ' ');
-    t = t.replaceAll(RegExp(r'\b(?:s\d{1,2}|season\s?\d{1,2})\b', caseSensitive: false), ' ');
+    t = t.replaceAll(
+        RegExp(r'\b(?:s\d{1,2}|season\s?\d{1,2})\b', caseSensitive: false),
+        ' ');
     return normalizeTitle(t);
   }
 
@@ -158,11 +199,12 @@ class ZarhostingService {
         '${ApiConstants.zarhostingBaseUrl}/search?q=${Uri.encodeComponent(cleanTitle)}&page=1&per_page=30',
       );
 
-      final res = await http.get(url, headers: ApiConstants.zarhostingApiHeaders).timeout(const Duration(seconds: 15));
+      final res = await _getProvider(url, timeout: const Duration(seconds: 15));
       if (res.statusCode != 200) return null;
 
       final data = json.decode(res.body);
-      final rawData = (data is Map && data['data'] != null) ? data['data'] : data;
+      final rawData =
+          (data is Map && data['data'] != null) ? data['data'] : data;
       final rawList = rawData is Map
           ? (rawData['items'] ?? rawData['results'] ?? [])
           : (rawData is List ? rawData : []);
@@ -176,31 +218,52 @@ class ZarhostingService {
         if (rawItem is! Map) continue;
         final item = rawItem.cast<String, dynamic>();
 
-        final itemTitle = (item['title'] ?? item['name'] ?? item['subject_title'] ?? '').toString();
-        final subjectId = (item['subject_id'] ?? item['subjectId'] ?? item['id'] ?? '').toString();
+        final itemTitle =
+            (item['title'] ?? item['name'] ?? item['subject_title'] ?? '')
+                .toString();
+        final subjectId =
+            (item['subject_id'] ?? item['subjectId'] ?? item['id'] ?? '')
+                .toString();
         // The stream endpoint only answers when detail_path is the provider
         // slug; passing the subject id there returns HTTP 502.
-        final detailPath = (item['detail_path'] ?? item['detailPath'] ?? item['slug'] ?? '').toString();
+        final detailPath =
+            (item['detail_path'] ?? item['detailPath'] ?? item['slug'] ?? '')
+                .toString()
+                .trim();
 
-        if (subjectId.isEmpty) continue;
+        if (subjectId.isEmpty || detailPath.isEmpty || detailPath == subjectId)
+          continue;
 
-        final itemYearStr = (item['year'] ?? item['release_year'] ?? item['release_date'] ?? '').toString();
-        final itemYear = int.tryParse(itemYearStr.length >= 4 ? itemYearStr.substring(0, 4) : itemYearStr) ?? 0;
+        final itemYearStr =
+            (item['year'] ?? item['release_year'] ?? item['release_date'] ?? '')
+                .toString();
+        final itemYear = int.tryParse(itemYearStr.length >= 4
+                ? itemYearStr.substring(0, 4)
+                : itemYearStr) ??
+            0;
 
-        final itemType = (item['type'] ?? item['subject_type'] ?? '').toString().toLowerCase();
-        final hasSeasons = item['seasons'] is List && (item['seasons'] as List).isNotEmpty;
-        final itemIsSeries = itemType == 'tv' || itemType == 'series' || itemType == '2' || hasSeasons;
+        final itemType = (item['type'] ?? item['subject_type'] ?? '')
+            .toString()
+            .toLowerCase();
+        final hasSeasons =
+            item['seasons'] is List && (item['seasons'] as List).isNotEmpty;
+        final itemIsSeries = itemType == 'tv' ||
+            itemType == 'series' ||
+            itemType == '2' ||
+            hasSeasons;
 
         // Discard opposing media type
         if (itemIsSeries != isSeries) {
           continue;
         }
 
-        final baseTitle = (item['base_title'] ?? item['baseTitle'] ?? '').toString();
+        final baseTitle =
+            (item['base_title'] ?? item['baseTitle'] ?? '').toString();
         final sim = [
           calculateSimilarity(title, itemTitle),
           if (baseTitle.isNotEmpty) calculateSimilarity(title, baseTitle),
-          calculateSimilarity(_comparisonTitle(title), _comparisonTitle(itemTitle)),
+          calculateSimilarity(
+              _comparisonTitle(title), _comparisonTitle(itemTitle)),
         ].reduce((a, b) => a > b ? a : b);
         if (sim < 0.55) continue;
 
@@ -223,7 +286,7 @@ class ZarhostingService {
           highestScore = score;
           bestCandidate = ZarhostingTarget(
             subjectId: subjectId,
-            detailPath: detailPath.isNotEmpty ? detailPath : subjectId,
+            detailPath: detailPath,
             title: itemTitle,
             year: itemYear,
             isSeries: itemIsSeries,
@@ -246,26 +309,37 @@ class ZarhostingService {
     int ep = 0,
   }) async {
     try {
-      final endpoint = '${ApiConstants.zarhostingBaseUrl}/stream/${Uri.encodeComponent(subjectId)}'
+      final endpoint =
+          '${ApiConstants.zarhostingBaseUrl}/stream/${Uri.encodeComponent(subjectId)}'
           '?detail_path=${Uri.encodeComponent(detailPath)}&se=$se&ep=$ep';
 
-      final res = await http.get(Uri.parse(endpoint), headers: ApiConstants.zarhostingApiHeaders).timeout(const Duration(seconds: 18));
-      if (res.statusCode != 200) return [];
+      final res = await _getProvider(Uri.parse(endpoint),
+          timeout: const Duration(seconds: 18));
+      if (res.statusCode != 200) {
+        throw ProviderException(
+            'The provider stream request failed (HTTP ${res.statusCode}).');
+      }
 
       final data = json.decode(res.body);
-      final body = (data is Map && data['data'] is Map) ? data['data'] : (data is Map ? data : {});
-
-      final sourcesList = (body['sources'] ?? body['streams'] ?? []) as List;
+      final rawBody = data is Map && data['data'] != null ? data['data'] : data;
+      final body = rawBody is Map
+          ? Map<String, dynamic>.from(rawBody)
+          : <String, dynamic>{};
+      final rawSources =
+          body['sources'] ?? body['streams'] ?? const <dynamic>[];
+      final sourcesList = rawSources is List ? rawSources : const <dynamic>[];
       final List<StreamSource> sources = [];
       final Set<String> seenUrls = {};
 
       for (final s in sourcesList) {
         if (s is Map) {
-          final map = s.cast<String, dynamic>();
+          final map = Map<String, dynamic>.from(s);
           // vip_locked sources are rejected by the CDN at playback time.
           if (map['vip_locked'] == true) continue;
           final src = StreamSource.fromJson(map);
-          if (src.url.startsWith('https://') && !src.isPreview && !seenUrls.contains(src.url)) {
+          if (src.url.startsWith('https://') &&
+              !src.isPreview &&
+              !seenUrls.contains(src.url)) {
             seenUrls.add(src.url);
             sources.add(src);
           }
@@ -274,9 +348,15 @@ class ZarhostingService {
 
       // Append adaptive manifests (HLS first, then DASH) when the provider
       // exposes them.
+      final rawHls =
+          body['hls'] is List ? body['hls'] as List : const <dynamic>[];
+      final rawDash =
+          body['dash'] is List ? body['dash'] as List : const <dynamic>[];
       for (final entry in [
-        ...((body['hls'] ?? []) as List).map((h) => MapEntry(h, 'HLS')),
-        ...((body['dash'] ?? []) as List).map((d) => MapEntry(d, 'DASH')),
+        ...rawHls.map(
+            (h) => MapEntry(h is Map ? h['url'] ?? h['stream_url'] : h, 'HLS')),
+        ...rawDash.map((d) =>
+            MapEntry(d is Map ? d['url'] ?? d['stream_url'] : d, 'DASH')),
       ]) {
         final u = entry.key.toString();
         if (u.startsWith('https://') && !seenUrls.contains(u)) {
@@ -302,8 +382,11 @@ class ZarhostingService {
       });
 
       return sources;
-    } catch (_) {
-      return [];
+    } on ProviderException {
+      rethrow;
+    } catch (error) {
+      throw ProviderException(
+          'The provider returned an unreadable stream response: $error');
     }
   }
 
@@ -314,22 +397,30 @@ class ZarhostingService {
     int ep = 0,
   }) async {
     try {
-      final endpoint = '${ApiConstants.zarhostingBaseUrl}/stream/${Uri.encodeComponent(subjectId)}/captions'
+      final endpoint =
+          '${ApiConstants.zarhostingBaseUrl}/stream/${Uri.encodeComponent(subjectId)}/captions'
           '?detail_path=${Uri.encodeComponent(detailPath)}&se=$se&ep=$ep';
 
-      final res = await http.get(Uri.parse(endpoint), headers: ApiConstants.zarhostingApiHeaders).timeout(const Duration(seconds: 12));
+      final res = await _getProvider(Uri.parse(endpoint),
+          timeout: const Duration(seconds: 12));
       if (res.statusCode != 200) return [];
 
       final data = json.decode(res.body);
-      final body = (data is Map && data['data'] is Map) ? data['data'] : (data is Map ? data : {});
-      final captionsList = (body['captions'] ?? body['subtitles'] ?? []) as List;
+      final rawBody = data is Map && data['data'] != null ? data['data'] : data;
+      final body = rawBody is Map
+          ? Map<String, dynamic>.from(rawBody)
+          : <String, dynamic>{};
+      final rawCaptions =
+          body['captions'] ?? body['subtitles'] ?? const <dynamic>[];
+      final captionsList =
+          rawCaptions is List ? rawCaptions : const <dynamic>[];
 
       final List<CaptionTrack> tracks = [];
       final Set<String> seen = {};
 
       for (final c in captionsList) {
         if (c is Map) {
-          final track = CaptionTrack.fromJson(c.cast<String, dynamic>());
+          final track = CaptionTrack.fromJson(Map<String, dynamic>.from(c));
           if (track.url.startsWith('https://') && !seen.contains(track.url)) {
             seen.add(track.url);
             tracks.add(track);

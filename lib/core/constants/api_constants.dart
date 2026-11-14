@@ -10,13 +10,16 @@ class ApiConstants {
   // the APK.
   static const String tmdbProxyUrl = '$supabaseUrl/functions/v1/tmdb-proxy';
   static const String tmdbImageBaseW500 = 'https://image.tmdb.org/t/p/w500';
-  static const String tmdbImageBaseOriginal = 'https://image.tmdb.org/t/p/original';
+  static const String tmdbImageBaseOriginal =
+      'https://image.tmdb.org/t/p/original';
 
   // Zarhosting Media Provider Endpoints (same integration used by Hallyu TV)
-  static const String zarhostingBaseUrl = 'https://movieapi.zarhosting.dpdns.org/api/public/v1';
+  static const String zarhostingBaseUrl =
+      'https://movieapi.zarhosting.dpdns.org/api/public/v1';
 
   static const Map<String, String> zarhostingApiHeaders = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     'Referer': 'https://moviebox.ph/',
     'Accept': 'application/json',
   };
@@ -47,5 +50,11 @@ class ApiConstants {
       'Referer': 'https://moviebox.ph/',
       'Origin': 'https://moviebox.ph',
     },
+    {'User-Agent': 'Mozilla/5.0'},
+  ];
+
+  static const List<Map<String, String>> zarhostingMediaHeaderProfiles = [
+    zarhostingMediaHeaders,
+    ...fallbackMediaHeaderProfiles,
   ];
 }

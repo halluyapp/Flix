@@ -56,7 +56,7 @@ jobs:
         run: flutter test
 
       - name: Build one universal release APK
-        run: flutter build apk --release
+        run: flutter build apk --release --build-name="1.0.${{ github.run_number }}" --build-number="${{ github.run_number }}"
 
       - name: Verify supported ABIs are packaged
         run: |
@@ -99,9 +99,10 @@ jobs:
           body: |
             ### Flix Android
             - One universal installable APK, verified to contain ARMv7, ARM64, and x86_64 native libraries.
-            - Supabase-backed TMDB catalogue proxy and verified short-film Clips feed.
-            - New & Hot remains available from the bottom navigation.
-            - CI-signed APK; use a managed release keystore before store distribution.
+            - Lazy-loaded navigation to reduce work during app startup.
+            - Provider playback retries, timed subtitles, and an in-app offline library with app-private MP4/subtitle files.
+            - APK versionCode increments with each GitHub Actions run so Android can install it as an update.
+            - CI build; configure a managed release keystore before store distribution.
           draft: false
           prerelease: false
         env:

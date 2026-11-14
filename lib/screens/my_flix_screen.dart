@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../services/download_service.dart';
 import '../services/user_state_service.dart';
 import '../widgets/media_card.dart';
+import 'downloads_screen.dart';
 import 'profile_screen.dart';
 
 class MyFlixScreen extends StatelessWidget {
@@ -10,6 +12,7 @@ class MyFlixScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final userState = Provider.of<UserStateService>(context);
+    final downloadCount = context.watch<DownloadService>().downloads.length;
 
     return Scaffold(
       backgroundColor: const Color(0xFF141414),
@@ -18,7 +21,8 @@ class MyFlixScreen extends StatelessWidget {
         elevation: 0,
         title: const Text(
           'My Flix',
-          style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold),
+          style: TextStyle(
+              color: Colors.white, fontSize: 22, fontWeight: FontWeight.bold),
         ),
         actions: [
           IconButton(
@@ -40,7 +44,8 @@ class MyFlixScreen extends StatelessWidget {
               children: [
                 CircleAvatar(
                   radius: 26,
-                  backgroundImage: NetworkImage(userState.currentProfile.avatarUrl),
+                  backgroundImage:
+                      NetworkImage(userState.currentProfile.avatarUrl),
                 ),
                 const SizedBox(width: 14),
                 Column(
@@ -48,17 +53,76 @@ class MyFlixScreen extends StatelessWidget {
                   children: [
                     Text(
                       userState.currentProfile.name,
-                      style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold),
                     ),
-                    const Text('Switch Profile', style: TextStyle(color: Colors.white54, fontSize: 12)),
+                    const Text('Switch Profile',
+                        style: TextStyle(color: Colors.white54, fontSize: 12)),
                   ],
                 ),
               ],
             ),
             const SizedBox(height: 24),
+            Material(
+              color: const Color(0xFF202020),
+              borderRadius: BorderRadius.circular(8),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(8),
+                onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const DownloadsScreen())),
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.download_for_offline_outlined,
+                          color: Color(0xFFE50914), size: 26),
+                      const SizedBox(width: 12),
+                      const Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('Downloads',
+                                style: TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.w700,
+                                    fontSize: 15)),
+                            SizedBox(height: 3),
+                            Text('Watch your saved movies and episodes offline',
+                                style: TextStyle(
+                                    color: Colors.white54, fontSize: 12)),
+                          ],
+                        ),
+                      ),
+                      if (downloadCount > 0)
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 4),
+                          decoration: BoxDecoration(
+                              color: Colors.white12,
+                              borderRadius: BorderRadius.circular(20)),
+                          child: Text('$downloadCount',
+                              style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold)),
+                        ),
+                      const SizedBox(width: 4),
+                      const Icon(Icons.chevron_right, color: Colors.white54),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 24),
             const Text(
               'My List',
-              style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+              style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 12),
             if (userState.myList.isEmpty)

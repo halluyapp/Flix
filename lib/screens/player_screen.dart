@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -9,10 +10,13 @@ import '../models/media_item.dart';
 import '../models/stream_source.dart';
 import '../models/caption_track.dart';
 import '../models/episode.dart';
+import '../models/offline_download.dart';
 import '../core/constants/api_constants.dart';
 import '../services/stream_resolver.dart';
 import '../services/zarhosting_service.dart';
 import '../services/tmdb_service.dart';
+import '../services/subtitle_service.dart';
+import '../widgets/player_media_options_sheet.dart';
 import '../services/user_state_service.dart';
 
 class PlayerScreen extends StatefulWidget {
@@ -20,6 +24,8 @@ class PlayerScreen extends StatefulWidget {
   final ZarhostingTarget? providerTarget;
   final int startSeason;
   final int startEpisode;
+  final String? offlineFilePath;
+  final List<OfflineSubtitle> offlineSubtitles;
 
   const PlayerScreen({
     super.key,
@@ -27,6 +33,8 @@ class PlayerScreen extends StatefulWidget {
     this.providerTarget,
     this.startSeason = 1,
     this.startEpisode = 1,
+    this.offlineFilePath,
+    this.offlineSubtitles = const [],
   });
 
   @override
@@ -43,11 +51,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
   UserStateService? _userState;
 
   bool _isResolving = true;
-  String _statusMessage = 'Searching stream catalog...';
+  String _statusMessage = 'Finding your title…';
   List<StreamSource> _availableSources = [];
   StreamSource? _selectedSource;
   List<CaptionTrack> _availableCaptions = [];
   CaptionTrack? _selectedCaption;
+  List<SubtitleCue> _subtitleCues = const [];
+  String _activeSubtitle = '';
+  List<OfflineSubtitle> _offlineSubtitles = const [];
+  OfflineSubtitle? _selectedOfflineSubtitle;
+  bool _recoveringPlayback = false;
+  int _playbackRecoveryAttempts = 0;
 
   int _currentSeason = 1;
   int _currentEpisode = 1;
@@ -74,15 +88,30 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _currentSeason = widget.startSeason;
     _currentEpisode = widget.startEpisode;
 
-    WakelockPlus.enable();
-    SystemChrome.setPreferredOrientations([
-      DeviceOrientation.landscapeRight,
-      DeviceOrientation.landscapeLeft,
-    ]);
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    _offlineSubtitles = widget.offlineSubtitles;
+    unawaited(_enterPlayerMode());
 
-    _loadEpisodesIfSeries();
-    _resolveAndPlay();
+    if (widget.item.mediaType == 'tv' && widget.offlineFilePath == null) {
+      _loadEpisodesIfSeries();
+    }
+    if (widget.offlineFilePath != null) {
+      _initializeOffline();
+    } else {
+      _resolveAndPlay();
+    }
+  }
+
+  Future<void> _enterPlayerMode() async {
+    try {
+      await WakelockPlus.enable();
+      await SystemChrome.setPreferredOrientations([
+        DeviceOrientation.landscapeRight,
+        DeviceOrientation.landscapeLeft,
+      ]);
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    } catch (error) {
+      debugPrint('Flix player mode could not be applied: $error');
+    }
   }
 
   @override
@@ -118,11 +147,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
     );
   }
 
-  Future<void> _resolveAndPlay() async {
+  Future<void> _resolveAndPlay({bool forceRefresh = false}) async {
     if (!mounted) return;
     setState(() {
       _isResolving = true;
-      _statusMessage = 'Connecting to Zarhosting CDN stream...';
+      _statusMessage = 'Finding the best version…';
       _showNextEpisodeCountdown = false;
     });
 
@@ -133,9 +162,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
         providerTarget: _effectiveProviderTarget,
         season: widget.item.mediaType == 'tv' ? _currentSeason : 0,
         episode: widget.item.mediaType == 'tv' ? _currentEpisode : 0,
+        forceRefresh: forceRefresh,
       );
-    } catch (_) {
+    } catch (error) {
       resolved = null;
+      debugPrint('Flix stream resolution failed: $error');
+      if (mounted && error is ProviderException) _statusMessage = error.message;
     }
 
     if (!mounted) return;
@@ -143,53 +175,85 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (resolved == null || resolved.selectableSources.isEmpty) {
       setState(() {
         _isResolving = false;
-        _statusMessage = 'No playable stream found for this title right now.';
+        _statusMessage =
+            'This title is temporarily unavailable. Please try again.';
       });
       return;
     }
 
     _availableSources = resolved.selectableSources;
-    _selectedSource = resolved.sources.isNotEmpty
-        ? (resolved.selectableSources.isNotEmpty ? resolved.selectableSources.first : resolved.sources.first)
-        : null;
+    final previousResolution = _selectedSource?.resolution;
+    _selectedSource = resolved.selectableSources.firstWhere(
+      (source) => source.resolution == previousResolution,
+      orElse: () => resolved!.selectableSources.first,
+    );
     _availableCaptions = resolved.captions;
     _selectedCaption = _availableCaptions.isEmpty
         ? null
-        : _availableCaptions.firstWhere((c) => c.isDefault, orElse: () => _availableCaptions.first);
+        : _availableCaptions.firstWhere((c) => c.isDefault,
+            orElse: () => _availableCaptions.first);
+    unawaited(_selectOnlineCaption(_selectedCaption));
 
-    await _initializePlayer(_selectedSource!.url);
+    final started = await _initializePlayer(_selectedSource!.url);
+    if (!started && !forceRefresh && mounted) {
+      _playbackRecoveryAttempts++;
+      if (_playbackRecoveryAttempts <= 1) {
+        await _resolveAndPlay(forceRefresh: true);
+        return;
+      }
+    }
   }
 
-  Future<void> _initializePlayer(String streamUrl) async {
+  Future<bool> _initializePlayer(String streamUrl, {Duration? startAt}) async {
     setState(() {
-      _statusMessage = 'Buffering stream...';
+      _isResolving = true;
+      _statusMessage = 'Getting your title ready…';
     });
 
-    await _videoPlayerController?.dispose();
+    final previousController = _videoPlayerController;
     _videoPlayerController = null;
+    await previousController?.dispose();
 
-    final controller = VideoPlayerController.networkUrl(
-      Uri.parse(streamUrl),
-      httpHeaders: ApiConstants.zarhostingMediaHeaders,
-    );
-    _videoPlayerController = controller;
+    VideoPlayerController? controller;
+    final profiles = widget.offlineFilePath == null
+        ? ApiConstants.zarhostingMediaHeaderProfiles
+        : const <Map<String, String>>[<String, String>{}];
+    for (final profile in profiles) {
+      try {
+        final attemptController = widget.offlineFilePath != null
+            ? VideoPlayerController.file(File(widget.offlineFilePath!))
+            : VideoPlayerController.networkUrl(Uri.parse(streamUrl),
+                httpHeaders: profile);
+        controller = attemptController;
+        _videoPlayerController = attemptController;
+        await attemptController.initialize();
+        if (attemptController.value.isInitialized) break;
+        await attemptController.dispose();
+        controller = null;
+        _videoPlayerController = null;
+      } catch (error) {
+        debugPrint('Flix player initialization attempt failed: $error');
+        await controller?.dispose();
+        controller = null;
+        _videoPlayerController = null;
+      }
+    }
 
-    try {
-      await controller.initialize();
-    } catch (_) {
+    if (controller == null || !controller.value.isInitialized) {
       if (mounted) {
         setState(() {
           _isResolving = false;
           _isPlaying = false;
-          _statusMessage = 'Playback failed. The stream may have expired, try another quality.';
+          _statusMessage =
+              'Playback could not start. Check your connection and try again.';
         });
       }
-      return;
+      return false;
     }
 
     if (!mounted) {
       await controller.dispose();
-      return;
+      return false;
     }
 
     controller.addListener(_videoListener);
@@ -200,11 +264,22 @@ class _PlayerScreenState extends State<PlayerScreen> {
       season: _currentSeason,
       episode: _currentEpisode,
     );
-    if (saved != null && !saved.isCompleted && saved.positionSeconds > 5) {
-      await controller.seekTo(Duration(seconds: saved.positionSeconds));
+    final resumePosition = startAt ??
+        (saved != null && !saved.isCompleted && saved.positionSeconds > 5
+            ? Duration(seconds: saved.positionSeconds)
+            : Duration.zero);
+    if (resumePosition > const Duration(seconds: 1)) {
+      await controller.seekTo(resumePosition);
     }
 
-    await controller.play();
+    try {
+      await controller.play();
+    } catch (error) {
+      debugPrint('Flix could not start playback: $error');
+      await controller.dispose();
+      if (mounted) setState(() => _videoPlayerController = null);
+      return false;
+    }
 
     _startProgressPeriodicSave();
     _resetOverlayTimer();
@@ -216,6 +291,147 @@ class _PlayerScreenState extends State<PlayerScreen> {
         _duration = controller.value.duration;
       });
     }
+    return true;
+  }
+
+  Future<void> _initializeOffline() async {
+    if (widget.offlineFilePath == null) return;
+    final file = File(widget.offlineFilePath!);
+    if (!await file.exists()) {
+      if (mounted) {
+        setState(() {
+          _isResolving = false;
+          _statusMessage =
+              'This offline copy is missing. Remove it from Downloads and try again.';
+        });
+      }
+      return;
+    }
+    setState(() {
+      _isResolving = true;
+      _statusMessage = 'Opening your offline copy…';
+    });
+    if (_offlineSubtitles.isNotEmpty) {
+      unawaited(_selectOfflineSubtitle(_offlineSubtitles.first));
+    }
+    final started = await _initializePlayer('', startAt: Duration.zero);
+    if (!started && mounted) {
+      setState(() {
+        _isResolving = false;
+        _statusMessage = 'This offline copy could not be opened.';
+      });
+    }
+  }
+
+  Future<void> _recoverPlayback() async {
+    if (widget.offlineFilePath != null) return;
+    if (_recoveringPlayback) return;
+    if (_playbackRecoveryAttempts >= 3) {
+      final failedController = _videoPlayerController;
+      _videoPlayerController = null;
+      await failedController?.dispose();
+      if (mounted) {
+        setState(() {
+          _isResolving = false;
+          _isPlaying = false;
+          _statusMessage = 'Playback was interrupted. Tap Retry to reconnect.';
+        });
+      }
+      return;
+    }
+    _recoveringPlayback = true;
+    _playbackRecoveryAttempts++;
+    final resumeAt = _videoPlayerController?.value.position ?? _position;
+    final resolution = _selectedSource?.resolution;
+    if (mounted) {
+      setState(() {
+        _isResolving = true;
+        _statusMessage = 'Reconnecting…';
+      });
+    }
+    try {
+      final fresh = await _resolver.resolve(
+        item: widget.item,
+        providerTarget: _effectiveProviderTarget,
+        season: widget.item.mediaType == 'tv' ? _currentSeason : 0,
+        episode: widget.item.mediaType == 'tv' ? _currentEpisode : 0,
+        forceRefresh: true,
+      );
+      if (!mounted || fresh == null || fresh.selectableSources.isEmpty)
+        throw StateError('No fresh stream was returned');
+      _availableSources = fresh.selectableSources;
+      _selectedSource = fresh.selectableSources.firstWhere(
+        (source) => source.resolution == resolution,
+        orElse: () => fresh.selectableSources.first,
+      );
+      _availableCaptions = fresh.captions;
+      final started =
+          await _initializePlayer(_selectedSource!.url, startAt: resumeAt);
+      if (!started && mounted) throw StateError('Playback could not restart');
+      _playbackRecoveryAttempts = 0;
+    } catch (error) {
+      debugPrint('Flix playback recovery failed: $error');
+      if (mounted) {
+        setState(() {
+          _isResolving = false;
+          _isPlaying = false;
+          _statusMessage = 'Playback was interrupted. Tap Retry to reconnect.';
+        });
+      }
+    } finally {
+      _recoveringPlayback = false;
+    }
+  }
+
+  Future<void> _selectOnlineCaption(CaptionTrack? track) async {
+    setState(() {
+      _selectedCaption = track;
+      _subtitleCues = const [];
+      _activeSubtitle = '';
+    });
+    if (track == null) return;
+    try {
+      final cues = await SubtitleService.fetch(track);
+      if (!mounted || _selectedCaption?.id != track.id) return;
+      setState(() => _subtitleCues = cues);
+    } catch (error) {
+      debugPrint('Flix subtitle load failed: $error');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('This subtitle track could not be loaded.')),
+        );
+      }
+    }
+  }
+
+  Future<void> _selectQuality(StreamSource source) async {
+    _playbackRecoveryAttempts = 0;
+    setState(() => _selectedSource = source);
+    final started = await _initializePlayer(source.url, startAt: _position);
+    if (!started && mounted) await _resolveAndPlay(forceRefresh: true);
+  }
+
+  Future<void> _selectOfflineSubtitle(OfflineSubtitle? subtitle) async {
+    setState(() {
+      _selectedOfflineSubtitle = subtitle;
+      _subtitleCues = const [];
+      _activeSubtitle = '';
+    });
+    if (subtitle == null) return;
+    try {
+      final text = await File(subtitle.path).readAsString();
+      final cues = SubtitleService.parse(text);
+      if (mounted) setState(() => _subtitleCues = cues);
+    } catch (error) {
+      debugPrint('Flix offline subtitle load failed: $error');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('This saved subtitle file could not be opened.')),
+        );
+      }
+    }
   }
 
   void _videoListener() {
@@ -223,8 +439,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (controller == null || !controller.value.isInitialized) return;
 
     final val = controller.value;
+    if (val.hasError) {
+      unawaited(_recoverPlayback());
+      return;
+    }
     final pos = val.position;
     final dur = val.duration;
+    final activeSubtitle = SubtitleService.activeText(_subtitleCues, pos);
 
     if (mounted) {
       setState(() {
@@ -232,11 +453,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
         _duration = dur;
         _isPlaying = val.isPlaying;
         _isBuffering = val.isBuffering;
+        _activeSubtitle = activeSubtitle;
       });
     }
 
     // Trigger Binge Countdown at 95% completion or last 45s on series episodes
-    if (widget.item.mediaType == 'tv' && dur.inSeconds > 60 && !_showNextEpisodeCountdown) {
+    if (widget.item.mediaType == 'tv' &&
+        widget.offlineFilePath == null &&
+        dur.inSeconds > 60 &&
+        !_showNextEpisodeCountdown) {
       final frac = dur.inSeconds > 0 ? pos.inSeconds / dur.inSeconds : 0.0;
       final remaining = dur.inSeconds - pos.inSeconds;
       if (frac >= 0.95 || remaining <= 45) {
@@ -349,114 +574,36 @@ class _PlayerScreenState extends State<PlayerScreen> {
   void _openAudioSubtitlesModal() {
     showModalBottomSheet(
       context: context,
+      isScrollControlled: true,
       backgroundColor: const Color(0xFF141414),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
-      builder: (ctx) {
-        return StatefulBuilder(
-          builder: (context, setModalState) {
-            return Container(
-              padding: const EdgeInsets.all(20),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // Audio / Quality
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Text(
-                          'VIDEO QUALITY',
-                          style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold),
-                        ),
-                        const SizedBox(height: 12),
-                        ..._availableSources.map((s) {
-                          final isSelected = s.url == _selectedSource?.url;
-                          return ListTile(
-                            dense: true,
-                            contentPadding: EdgeInsets.zero,
-                            title: Text(
-                              '${s.resolution} (${s.format})',
-                              style: TextStyle(
-                                color: isSelected ? const Color(0xFFE50914) : Colors.white,
-                                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                              ),
-                            ),
-                            trailing: isSelected ? const Icon(Icons.check, color: Color(0xFFE50914)) : null,
-                            onTap: () {
-                              setModalState(() => _selectedSource = s);
-                              Navigator.pop(ctx);
-                              _initializePlayer(s.url);
-                            },
-                          );
-                        }),
-                      ],
-                    ),
-                  ),
-                  const VerticalDivider(color: Colors.white24),
-                  // Subtitles
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Text(
-                          'SUBTITLES',
-                          style: TextStyle(color: Colors.white70, fontSize: 13, fontWeight: FontWeight.bold),
-                        ),
-                        const SizedBox(height: 12),
-                        ListTile(
-                          dense: true,
-                          contentPadding: EdgeInsets.zero,
-                          title: Text(
-                            'Off',
-                            style: TextStyle(
-                              color: _selectedCaption == null ? const Color(0xFFE50914) : Colors.white,
-                              fontWeight: _selectedCaption == null ? FontWeight.bold : FontWeight.normal,
-                            ),
-                          ),
-                          trailing: _selectedCaption == null ? const Icon(Icons.check, color: Color(0xFFE50914)) : null,
-                          onTap: () {
-                            setModalState(() => _selectedCaption = null);
-                            Navigator.pop(ctx);
-                            setState(() => _selectedCaption = null);
-                          },
-                        ),
-                        ..._availableCaptions.map((c) {
-                          final isSelected = c.id == _selectedCaption?.id;
-                          return ListTile(
-                            dense: true,
-                            contentPadding: EdgeInsets.zero,
-                            title: Text(
-                              c.languageName,
-                              style: TextStyle(
-                                color: isSelected ? const Color(0xFFE50914) : Colors.white,
-                                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                              ),
-                            ),
-                            trailing: isSelected ? const Icon(Icons.check, color: Color(0xFFE50914)) : null,
-                            onTap: () {
-                              setModalState(() => _selectedCaption = c);
-                              Navigator.pop(ctx);
-                              setState(() => _selectedCaption = c);
-                            },
-                          );
-                        }),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            );
-          },
-        );
-      },
+      builder: (_) => PlayerMediaOptionsSheet(
+        isOffline: widget.offlineFilePath != null,
+        sources: _availableSources,
+        selectedSource: _selectedSource,
+        captions: _availableCaptions,
+        selectedCaption: _selectedCaption,
+        offlineSubtitles: _offlineSubtitles,
+        selectedOfflineSubtitle: _selectedOfflineSubtitle,
+        onSubtitleOff: () {
+          if (widget.offlineFilePath != null) {
+            _selectOfflineSubtitle(null);
+          } else {
+            _selectOnlineCaption(null);
+          }
+        },
+        onQualitySelected: (source) => unawaited(_selectQuality(source)),
+        onCaptionSelected: (caption) => _selectOnlineCaption(caption),
+        onOfflineCaptionSelected: (subtitle) =>
+            _selectOfflineSubtitle(subtitle),
+      ),
     );
   }
 
   void _openEpisodesDrawer() {
+    if (widget.offlineFilePath != null) return;
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF141414),
@@ -476,7 +623,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 children: [
                   Text(
                     'Episodes • Season $_currentSeason',
-                    style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold),
                   ),
                   IconButton(
                     icon: const Icon(Icons.close, color: Colors.white),
@@ -495,7 +645,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       )
                     : ListView.separated(
                         itemCount: _seasonEpisodes.length,
-                        separatorBuilder: (_, __) => const Divider(color: Colors.white12),
+                        separatorBuilder: (_, __) =>
+                            const Divider(color: Colors.white12),
                         itemBuilder: (context, idx) {
                           final ep = _seasonEpisodes[idx];
                           final isCurrent = ep.episodeNumber == _currentEpisode;
@@ -511,24 +662,33 @@ class _PlayerScreenState extends State<PlayerScreen> {
                                     width: 80,
                                     height: 50,
                                     fit: BoxFit.cover,
-                                    errorBuilder: (_, __, ___) => Container(width: 80, height: 50, color: Colors.grey[900]),
+                                    errorBuilder: (_, __, ___) => Container(
+                                        width: 80,
+                                        height: 50,
+                                        color: Colors.grey[900]),
                                   ),
                                 ),
                                 if (isCurrent)
-                                  const Icon(Icons.play_circle_fill, color: Color(0xFFE50914), size: 24),
+                                  const Icon(Icons.play_circle_fill,
+                                      color: Color(0xFFE50914), size: 24),
                               ],
                             ),
                             title: Text(
                               '${ep.episodeNumber}. ${ep.name}',
                               style: TextStyle(
-                                color: isCurrent ? const Color(0xFFE50914) : Colors.white,
-                                fontWeight: isCurrent ? FontWeight.bold : FontWeight.w500,
+                                color: isCurrent
+                                    ? const Color(0xFFE50914)
+                                    : Colors.white,
+                                fontWeight: isCurrent
+                                    ? FontWeight.bold
+                                    : FontWeight.w500,
                                 fontSize: 14,
                               ),
                             ),
                             subtitle: Text(
                               '${ep.runtime}m',
-                              style: const TextStyle(color: Colors.white54, fontSize: 12),
+                              style: const TextStyle(
+                                  color: Colors.white54, fontSize: 12),
                             ),
                             onTap: () {
                               Navigator.pop(ctx);
@@ -566,10 +726,19 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _videoPlayerController?.removeListener(_videoListener);
     _videoPlayerController?.dispose();
 
-    WakelockPlus.disable();
-    SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
-    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    unawaited(_leavePlayerMode());
     super.dispose();
+  }
+
+  Future<void> _leavePlayerMode() async {
+    try {
+      await WakelockPlus.disable();
+      await SystemChrome.setPreferredOrientations(
+          [DeviceOrientation.portraitUp]);
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    } catch (error) {
+      debugPrint('Flix player mode could not be restored: $error');
+    }
   }
 
   @override
@@ -579,7 +748,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
       body: Stack(
         children: [
           // 1. Video Surface & Double-tap gesture detectors
-          if (_videoPlayerController != null && _videoPlayerController!.value.isInitialized)
+          if (_videoPlayerController != null &&
+              _videoPlayerController!.value.isInitialized)
             GestureDetector(
               onTap: () {
                 setState(() {
@@ -602,7 +772,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   if (_isResolving)
                     const CircularProgressIndicator(color: Color(0xFFE50914))
                   else
-                    const Icon(Icons.videocam_off_outlined, color: Colors.white54, size: 48),
+                    const Icon(Icons.videocam_off_outlined,
+                        color: Colors.white54, size: 48),
                   const SizedBox(height: 16),
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 32),
@@ -615,7 +786,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   if (!_isResolving) ...[
                     const SizedBox(height: 16),
                     ElevatedButton.icon(
-                      onPressed: _resolveAndPlay,
+                      onPressed: () {
+                        _playbackRecoveryAttempts = 0;
+                        _resolveAndPlay(forceRefresh: true);
+                      },
                       icon: const Icon(Icons.refresh, size: 18),
                       label: const Text('Retry'),
                       style: ElevatedButton.styleFrom(
@@ -626,10 +800,39 @@ class _PlayerScreenState extends State<PlayerScreen> {
                     const SizedBox(height: 8),
                     TextButton(
                       onPressed: () => Navigator.of(context).pop(),
-                      child: const Text('Back', style: TextStyle(color: Colors.white70)),
+                      child: const Text('Back',
+                          style: TextStyle(color: Colors.white70)),
                     ),
                   ],
                 ],
+              ),
+            ),
+
+          if (_activeSubtitle.isNotEmpty && !_isResolving)
+            Positioned(
+              left: 28,
+              right: 28,
+              bottom: _showControls ? 104 : 34,
+              child: IgnorePointer(
+                child: Center(
+                  child: Container(
+                    constraints: const BoxConstraints(maxWidth: 720),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                    decoration: BoxDecoration(
+                        color: Colors.black.withValues(alpha: 0.78),
+                        borderRadius: BorderRadius.circular(4)),
+                    child: Text(
+                      _activeSubtitle,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 18,
+                          height: 1.25,
+                          fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                ),
               ),
             ),
 
@@ -662,13 +865,18 @@ class _PlayerScreenState extends State<PlayerScreen> {
               left: 60,
               top: MediaQuery.of(context).size.height / 2 - 30,
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(20)),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                decoration: BoxDecoration(
+                    color: Colors.black54,
+                    borderRadius: BorderRadius.circular(20)),
                 child: const Row(
                   children: [
                     Icon(Icons.replay_10, color: Colors.white, size: 28),
                     SizedBox(width: 6),
-                    Text('10s', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                    Text('10s',
+                        style: TextStyle(
+                            color: Colors.white, fontWeight: FontWeight.bold)),
                   ],
                 ),
               ),
@@ -678,11 +886,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
               right: 60,
               top: MediaQuery.of(context).size.height / 2 - 30,
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(20)),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                decoration: BoxDecoration(
+                    color: Colors.black54,
+                    borderRadius: BorderRadius.circular(20)),
                 child: const Row(
                   children: [
-                    Text('10s', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                    Text('10s',
+                        style: TextStyle(
+                            color: Colors.white, fontWeight: FontWeight.bold)),
                     SizedBox(width: 6),
                     Icon(Icons.forward_10, color: Colors.white, size: 28),
                   ],
@@ -701,7 +914,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
             Container(
               decoration: const BoxDecoration(
                 gradient: LinearGradient(
-                  colors: [Colors.black87, Colors.transparent, Colors.transparent, Colors.black87],
+                  colors: [
+                    Colors.black87,
+                    Colors.transparent,
+                    Colors.transparent,
+                    Colors.black87
+                  ],
                   begin: Alignment.topCenter,
                   end: Alignment.bottomCenter,
                 ),
@@ -711,11 +929,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 children: [
                   // Top Bar
                   Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 24, vertical: 16),
                     child: Row(
                       children: [
                         IconButton(
-                          icon: const Icon(Icons.arrow_back, color: Colors.white, size: 28),
+                          icon: const Icon(Icons.arrow_back,
+                              color: Colors.white, size: 28),
                           onPressed: () => Navigator.of(context).pop(),
                         ),
                         const SizedBox(width: 12),
@@ -724,17 +944,23 @@ class _PlayerScreenState extends State<PlayerScreen> {
                             widget.item.mediaType == 'tv'
                                 ? '${widget.item.title}  •  S$_currentSeason:E$_currentEpisode'
                                 : widget.item.title,
-                            style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+                            style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold),
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
                         IconButton(
-                          icon: const Icon(Icons.subtitles_outlined, color: Colors.white, size: 26),
+                          icon: const Icon(Icons.subtitles_outlined,
+                              color: Colors.white, size: 26),
                           onPressed: _openAudioSubtitlesModal,
                         ),
-                        if (widget.item.mediaType == 'tv')
+                        if (widget.item.mediaType == 'tv' &&
+                            widget.offlineFilePath == null)
                           IconButton(
-                            icon: const Icon(Icons.video_library_outlined, color: Colors.white, size: 26),
+                            icon: const Icon(Icons.video_library_outlined,
+                                color: Colors.white, size: 26),
                             onPressed: _openEpisodesDrawer,
                           ),
                       ],
@@ -746,17 +972,24 @@ class _PlayerScreenState extends State<PlayerScreen> {
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       IconButton(
-                        icon: const Icon(Icons.replay_10, color: Colors.white, size: 38),
+                        icon: const Icon(Icons.replay_10,
+                            color: Colors.white, size: 38),
                         onPressed: () => _seekBy(-10),
                       ),
                       const SizedBox(width: 40),
                       IconButton(
-                        icon: Icon(_isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled, color: Colors.white, size: 64),
+                        icon: Icon(
+                            _isPlaying
+                                ? Icons.pause_circle_filled
+                                : Icons.play_circle_filled,
+                            color: Colors.white,
+                            size: 64),
                         onPressed: _togglePlayPause,
                       ),
                       const SizedBox(width: 40),
                       IconButton(
-                        icon: const Icon(Icons.forward_10, color: Colors.white, size: 38),
+                        icon: const Icon(Icons.forward_10,
+                            color: Colors.white, size: 38),
                         onPressed: () => _seekBy(10),
                       ),
                     ],
@@ -764,23 +997,31 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
                   // Bottom Progress Bar & Time
                   Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 24, vertical: 12),
                     child: Column(
                       children: [
                         SliderTheme(
                           data: SliderTheme.of(context).copyWith(
                             trackHeight: 3.5,
-                            thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6.0),
-                            overlayShape: const RoundSliderOverlayShape(overlayRadius: 12.0),
+                            thumbShape: const RoundSliderThumbShape(
+                                enabledThumbRadius: 6.0),
+                            overlayShape: const RoundSliderOverlayShape(
+                                overlayRadius: 12.0),
                             activeTrackColor: const Color(0xFFE50914),
                             inactiveTrackColor: Colors.white24,
                             thumbColor: const Color(0xFFE50914),
                           ),
                           child: Slider(
-                            value: _position.inSeconds.toDouble().clamp(0.0, _duration.inSeconds.toDouble()),
-                            max: _duration.inSeconds > 0 ? _duration.inSeconds.toDouble() : 1.0,
+                            value: _position.inSeconds
+                                .toDouble()
+                                .clamp(0.0, _duration.inSeconds.toDouble()),
+                            max: _duration.inSeconds > 0
+                                ? _duration.inSeconds.toDouble()
+                                : 1.0,
                             onChanged: (val) {
-                              _videoPlayerController?.seekTo(Duration(seconds: val.toInt()));
+                              _videoPlayerController
+                                  ?.seekTo(Duration(seconds: val.toInt()));
                               _resetOverlayTimer();
                             },
                           ),
@@ -790,11 +1031,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
                           children: [
                             Text(
                               _formatDuration(_position),
-                              style: const TextStyle(color: Colors.white70, fontSize: 12),
+                              style: const TextStyle(
+                                  color: Colors.white70, fontSize: 12),
                             ),
                             Text(
                               _formatDuration(_duration),
-                              style: const TextStyle(color: Colors.white70, fontSize: 12),
+                              style: const TextStyle(
+                                  color: Colors.white70, fontSize: 12),
                             ),
                           ],
                         ),
@@ -811,7 +1054,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
               bottom: 80,
               right: 28,
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
                 decoration: BoxDecoration(
                   color: Colors.black.withValues(alpha: 0.85),
                   borderRadius: BorderRadius.circular(8),
@@ -822,19 +1066,27 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   children: [
                     Text(
                       'Next Episode in $_nextEpisodeCountdownSeconds...',
-                      style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w500),
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500),
                     ),
                     const SizedBox(width: 12),
                     ElevatedButton(
                       style: ElevatedButton.styleFrom(
                         backgroundColor: const Color(0xFFE50914),
-                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 8),
                       ),
                       onPressed: _playNextEpisode,
-                      child: const Text('Play Next', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                      child: const Text('Play Next',
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold)),
                     ),
                     IconButton(
-                      icon: const Icon(Icons.close, color: Colors.white70, size: 18),
+                      icon: const Icon(Icons.close,
+                          color: Colors.white70, size: 18),
                       onPressed: () {
                         _countdownTimer?.cancel();
                         setState(() => _showNextEpisodeCountdown = false);

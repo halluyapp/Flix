@@ -44,6 +44,29 @@ void main() {
       expect(source.verifiedFullLength, true);
     });
 
+    test(
+        'normalizes provider size units and only exposes full MP4 files to downloads',
+        () {
+      final source = StreamSource.fromJson({
+        'url': 'https://cdn.example.com/film.mp4',
+        'resolution': '720p',
+        'format': 'mp4',
+        'duration_seconds': 5400,
+        'size_mb': '900',
+      });
+
+      expect(source.sizeBytes, 900 * 1024 * 1024);
+      expect(source.isDownloadable, isTrue);
+
+      final hls = StreamSource.fromJson({
+        'url': 'https://cdn.example.com/master.m3u8',
+        'resolution': 'Auto',
+        'format': 'HLS',
+        'duration_seconds': 5400,
+      });
+      expect(hls.isDownloadable, isFalse);
+    });
+
     test('classifies short duration or preview label as isPreview = true', () {
       final trailerJson = {
         'file': 'https://cdn.example.com/trailer.mp4',
@@ -56,6 +79,7 @@ void main() {
 
       expect(source.isPreview, true);
       expect(source.verifiedFullLength, null);
+      expect(source.isDownloadable, isFalse);
     });
   });
 }
