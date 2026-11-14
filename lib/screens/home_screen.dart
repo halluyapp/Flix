@@ -233,18 +233,18 @@ class _HomeScreenState extends State<HomeScreen> {
         borderRadius: BorderRadius.circular(8),
         border: Border.all(color: const Color(0xFF2B2B2B)),
       ),
-      child: Column(
+      child: const Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
+          Text(
             'Catalogue unavailable',
             style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold),
           ),
-          const SizedBox(height: 6),
+          SizedBox(height: 6),
           Text(
             'Flix could not reach its Supabase-backed catalogue. Check your connection and pull to refresh. '
                 'If this continues, verify the TMDB_READ_TOKEN secret in the Flix Supabase project.',
-            style: const TextStyle(color: Color(0xFFA3A3A3), fontSize: 12, height: 1.4),
+            style: TextStyle(color: Color(0xFFA3A3A3), fontSize: 12, height: 1.4),
           ),
         ],
       ),

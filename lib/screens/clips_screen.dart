@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../models/provider_clip.dart';
-import '../models/media_item.dart';
 import '../services/clips_service.dart';
 import '../services/user_state_service.dart';
 import '../services/zarhosting_service.dart';
