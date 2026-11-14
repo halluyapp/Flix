@@ -114,6 +114,9 @@ jobs:
     timeout-minutes: 25
 
     steps:
+      - name: Checkout smoke-test script
+        uses: actions/checkout@v4
+
       - name: Download universal APK
         uses: actions/download-artifact@v4
         with:
