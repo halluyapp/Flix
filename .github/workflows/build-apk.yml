@@ -141,7 +141,7 @@ jobs:
           emulator-options: -no-snapshot -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           script: |
-            set -euo pipefail
+            bash -euo pipefail <<'BASH'
             mkdir -p artifacts/emulator artifacts/screenshots
             adb devices -l | tee artifacts/emulator/adb-devices.txt
             adb shell getprop ro.build.version.release > artifacts/emulator/android-version.txt
@@ -200,6 +200,7 @@ jobs:
               echo 'Android crash buffer contains a fatal exception.'
               exit 1
             fi
+            BASH
 
       - name: Upload Home and Clips screenshots
         uses: actions/upload-artifact@v4
