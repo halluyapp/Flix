@@ -1,5 +1,5 @@
 name: flix
-description: "Flix — Cinema-grade Netflix Clone mobile app powered by TMDB and Zarhosting streaming."
+description: "Flix is an original Flutter streaming discovery app with a real short-film Clips feed."
 publish_to: "none"
 version: 1.0.0+1
 

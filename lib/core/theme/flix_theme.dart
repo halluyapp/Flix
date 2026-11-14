@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
-class NetflixTheme {
+class FlixTheme {
   static const Color background = Color(0xFF141414);
   static const Color surface = Color(0xFF1F1F1F);
   static const Color surfaceElevation2 = Color(0xFF2B2B2B);
@@ -10,8 +10,6 @@ class NetflixTheme {
   static const Color grey = Color(0xFFA3A3A3);
   static const Color darkGrey = Color(0xFF4A4A4A);
   static const Color matchGreen = Color(0xFF46D369);
-  static const Color netflixRed = red;
-  static const Color netflixBlack = background;
 
   static ThemeData get darkTheme {
     return ThemeData(

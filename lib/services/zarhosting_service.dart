@@ -3,6 +3,7 @@ import 'package:http/http.dart' as http;
 import '../core/constants/api_constants.dart';
 import '../models/stream_source.dart';
 import '../models/caption_track.dart';
+import '../models/provider_clip.dart';
 
 class ZarhostingTarget {
   final String subjectId;
@@ -21,6 +22,91 @@ class ZarhostingTarget {
 }
 
 class ZarhostingService {
+  static const List<String> _shortFilmSearches = [
+    'animated short film',
+    'short animation',
+    'animation short',
+    'short film',
+  ];
+
+  /// Searches the provider catalogue and keeps only playable movie records
+  /// whose metadata explicitly includes the Short genre. A query match alone
+  /// is deliberately never enough for the Clips feed.
+  Future<List<ProviderClip>> searchShortFilms() async {
+    final firstPages = await Future.wait(
+      _shortFilmSearches.map((query) => _searchCatalog(query, page: 1)),
+    );
+    final discovered = <String, ProviderClip>{};
+
+    void addPage(_ProviderSearchPage page) {
+      for (final clip in page.items) {
+        final key = '${normalizeTitle(clip.title)}_${clip.year}';
+        final existing = discovered[key];
+        if (existing == null || clip.rating > existing.rating) {
+          discovered[key] = clip;
+        }
+      }
+    }
+
+    for (final page in firstPages) {
+      addPage(page);
+    }
+
+    if (discovered.length < 18) {
+      final nextPages = <Future<_ProviderSearchPage>>[];
+      for (var index = 0; index < firstPages.length && nextPages.length < 4; index++) {
+        if (firstPages[index].hasMore) {
+          nextPages.add(_searchCatalog(_shortFilmSearches[index], page: 2));
+        }
+      }
+      for (final page in await Future.wait(nextPages)) {
+        addPage(page);
+      }
+    }
+
+    final clips = discovered.values.toList()
+      ..sort((a, b) {
+        final ratingOrder = b.rating.compareTo(a.rating);
+        if (ratingOrder != 0) return ratingOrder;
+        final yearOrder = b.year.compareTo(a.year);
+        return yearOrder != 0 ? yearOrder : a.title.compareTo(b.title);
+      });
+    return clips.take(48).toList();
+  }
+
+  Future<_ProviderSearchPage> _searchCatalog(String query, {required int page}) async {
+    try {
+      final uri = Uri.parse('${ApiConstants.zarhostingBaseUrl}/search').replace(
+        queryParameters: {
+          'q': query,
+          'page': page.toString(),
+          'per_page': '30',
+        },
+      );
+      final response = await http
+          .get(uri, headers: ApiConstants.zarhostingApiHeaders)
+          .timeout(const Duration(seconds: 14));
+      if (response.statusCode != 200) return const _ProviderSearchPage.empty();
+
+      final decoded = json.decode(response.body);
+      final root = decoded is Map && decoded['data'] is Map ? decoded['data'] : decoded;
+      final rawItems = root is Map
+          ? (root['items'] ?? root['results'] ?? root['data'] ?? const [])
+          : root;
+      final items = rawItems is List
+          ? rawItems
+              .whereType<Map>()
+              .map((raw) => ProviderClip.fromProviderJson(Map<String, dynamic>.from(raw)))
+              .whereType<ProviderClip>()
+              .toList()
+          : <ProviderClip>[];
+      final hasMore = root is Map && (root['has_more'] == true || root['hasMore'] == true);
+      return _ProviderSearchPage(items: items, hasMore: hasMore);
+    } catch (_) {
+      return const _ProviderSearchPage.empty();
+    }
+  }
+
   static String normalizeTitle(String raw) {
     return raw
         .toLowerCase()
@@ -255,4 +341,15 @@ class ZarhostingService {
       return [];
     }
   }
+}
+
+class _ProviderSearchPage {
+  final List<ProviderClip> items;
+  final bool hasMore;
+
+  const _ProviderSearchPage({required this.items, required this.hasMore});
+
+  const _ProviderSearchPage.empty()
+      : items = const [],
+        hasMore = false;
 }

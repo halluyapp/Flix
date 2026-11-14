@@ -1,4 +1,4 @@
-project_id = "flix-backend"
+project_id = "jewtsdupzwwkdoudwgyk"
 
 [api]
 port = 54321
@@ -13,3 +13,9 @@ enable_signup = true
 [edge_runtime]
 enabled = true
 port = 54322
+
+[functions.clips-feed]
+verify_jwt = false
+
+[functions.tmdb-proxy]
+verify_jwt = false

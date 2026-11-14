@@ -11,17 +11,20 @@ import '../models/caption_track.dart';
 import '../models/episode.dart';
 import '../core/constants/api_constants.dart';
 import '../services/stream_resolver.dart';
+import '../services/zarhosting_service.dart';
 import '../services/tmdb_service.dart';
 import '../services/user_state_service.dart';
 
 class PlayerScreen extends StatefulWidget {
   final MediaItem item;
+  final ZarhostingTarget? providerTarget;
   final int startSeason;
   final int startEpisode;
 
   const PlayerScreen({
     super.key,
     required this.item,
+    this.providerTarget,
     this.startSeason = 1,
     this.startEpisode = 1,
   });
@@ -101,6 +104,20 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
   }
 
+  ZarhostingTarget? get _effectiveProviderTarget {
+    if (widget.providerTarget != null) return widget.providerTarget;
+    final subjectId = widget.item.providerSubjectId;
+    final detailPath = widget.item.providerDetailPath;
+    if (subjectId == null || detailPath == null) return null;
+    return ZarhostingTarget(
+      subjectId: subjectId,
+      detailPath: detailPath,
+      title: widget.item.title,
+      year: widget.item.releaseYear,
+      isSeries: widget.item.mediaType == 'tv',
+    );
+  }
+
   Future<void> _resolveAndPlay() async {
     if (!mounted) return;
     setState(() {
@@ -113,6 +130,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     try {
       resolved = await _resolver.resolve(
         item: widget.item,
+        providerTarget: _effectiveProviderTarget,
         season: widget.item.mediaType == 'tv' ? _currentSeason : 0,
         episode: widget.item.mediaType == 'tv' ? _currentEpisode : 0,
       );

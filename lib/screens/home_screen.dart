@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/media_item.dart';
-import '../core/constants/api_constants.dart';
 import '../services/tmdb_service.dart';
 import '../services/user_state_service.dart';
 import '../widgets/hero_billboard.dart';
@@ -197,10 +196,8 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           const SizedBox(height: 6),
           Text(
-            ApiConstants.hasTmdbCredentials
-                ? 'TMDB could not be reached. Check your connection and pull to refresh.'
-                : 'No TMDB credentials were compiled into this build. Rebuild with '
-                    '--dart-define=TMDB_API_KEY=your_key to load the catalogue.',
+            'Flix could not reach its Supabase-backed catalogue. Check your connection and pull to refresh. '
+                'If this continues, verify the TMDB_READ_TOKEN secret in the Flix Supabase project.',
             style: const TextStyle(color: Color(0xFFA3A3A3), fontSize: 12, height: 1.4),
           ),
         ],

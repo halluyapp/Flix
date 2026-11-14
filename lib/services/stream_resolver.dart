@@ -31,10 +31,10 @@ class ResolvedMediaStream {
 
 /// Resolves a TMDB title to playable Zarhosting sources.
 ///
-/// There is no backend: resolution contacts the provider directly and keeps a
-/// short-lived in-memory cache so repeated playback of the same episode does
-/// not re-run search/stream endpoints. Provider URLs expire, so entries are
-/// dropped after [cacheTtl] and failures are never cached.
+/// Stream playback currently resolves directly against the provider and keeps
+/// a short-lived in-memory cache so repeated playback does not re-run search
+/// and stream endpoints. Provider URLs expire, so entries are dropped after
+/// [cacheTtl] and failures are never cached.
 class StreamResolver {
   static const Duration cacheTtl = Duration(hours: 2);
 
@@ -45,10 +45,13 @@ class StreamResolver {
 
   Future<ResolvedMediaStream?> resolve({
     required MediaItem item,
+    ZarhostingTarget? providerTarget,
     int season = 0,
     int episode = 0,
   }) async {
-    final cacheKey = '${item.id}_${item.mediaType}_${season}_$episode';
+    final cacheKey = providerTarget == null
+        ? '${item.id}_${item.mediaType}_${season}_$episode'
+        : 'provider_${providerTarget.subjectId}_${season}_$episode';
 
     final cached = _memoryCache[cacheKey];
     if (cached != null) {
@@ -58,7 +61,7 @@ class StreamResolver {
       _memoryCache.remove(cacheKey);
     }
 
-    final target = await _directService.findMatch(
+    final target = providerTarget ?? await _directService.findMatch(
       title: item.title,
       year: item.releaseYear,
       isSeries: item.mediaType == 'tv',
