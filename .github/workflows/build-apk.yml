@@ -147,7 +147,7 @@ jobs:
           working-directory: ${{ github.workspace }}
           script: bash .github/scripts/emulator-smoke.sh
 
-      - name: Upload Home and Clips screenshots
+      - name: Upload Home and movie media screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:

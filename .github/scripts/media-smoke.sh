@@ -9,15 +9,52 @@ width=${size%x*}
 height=${size#*x}
 ui_file=artifacts/emulator/media-window.xml
 
+tap_text_in_xml() {
+  local path=$1 label=$2 coordinates
+  coordinates=$(python3 - "$path" "$label" <<'PY'
+import re
+import sys
+import xml.etree.ElementTree as ET
+
+root = ET.parse(sys.argv[1]).getroot()
+for node in root.iter():
+    if node.get('text') != sys.argv[2]:
+        continue
+    m = re.fullmatch(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', node.get('bounds', ''))
+    if m:
+        x1, y1, x2, y2 = map(int, m.groups())
+        print((x1 + x2) // 2, (y1 + y2) // 2)
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+) || return 1
+  read -r x y <<<"$coordinates"
+  adb shell input tap "$x" "$y"
+}
+
 dump_ui() {
   local destination=${1:-$ui_file}
-  adb shell uiautomator dump /sdcard/flix-media-window.xml >/dev/null
-  adb pull /sdcard/flix-media-window.xml "$destination" >/dev/null
+  for _ in 1 2 3; do
+    adb shell uiautomator dump /sdcard/flix-media-window.xml >/dev/null 2>&1
+    adb pull /sdcard/flix-media-window.xml "$destination" >/dev/null 2>&1
+    if ! grep -Fq "Pixel Launcher isn't responding" "$destination"; then
+      return 0
+    fi
+    cp "$destination" artifacts/emulator/launcher-anr-window.xml
+    if ! tap_text_in_xml "$destination" 'Wait'; then
+      echo 'Pixel Launcher ANR dialog is visible but its Wait button was not found.' >&2
+      return 1
+    fi
+    sleep 3
+  done
+  echo 'Pixel Launcher ANR dialog did not dismiss after three attempts.' >&2
+  return 1
 }
 
 tap_label() {
   local label=$1
   local coordinates
+  dump_ui
   coordinates=$(python3 - "$ui_file" "$label" <<'PY'
 import re
 import sys
@@ -45,6 +82,32 @@ print(x, y)
 PY
 ) || {
     echo "Could not find visible UI label: $label" >&2
+    return 1
+  }
+  read -r x y <<<"$coordinates"
+  adb shell input tap "$x" "$y"
+}
+
+tap_search_field() {
+  local coordinates
+  coordinates=$(python3 - "$ui_file" <<'PY'
+import re
+import sys
+import xml.etree.ElementTree as ET
+
+root = ET.parse(sys.argv[1]).getroot()
+for node in root.iter():
+    if node.get('class') != 'android.widget.EditText':
+        continue
+    m = re.fullmatch(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', node.get('bounds', ''))
+    if m:
+        x1, y1, x2, y2 = map(int, m.groups())
+        print((x1 + x2) // 2, (y1 + y2) // 2)
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+) || {
+    echo 'Could not find the Search text field.' >&2
     return 1
   }
   read -r x y <<<"$coordinates"
@@ -119,9 +182,12 @@ wait_for_active_player() {
 
 # Search Flix's TMDB catalogue. TMDB returns the 2024 remake first and the
 # 1922 public-domain film second for this query.
+dump_ui
 adb shell input tap "$((width * 70 / 100))" "$((height * 93 / 100))"
 sleep 2
-adb shell input tap "$((width / 2))" "$((height * 7 / 100))"
+dump_ui
+tap_search_field
+dump_ui
 adb shell input text 'Nosferatu'
 adb shell input keyevent KEYCODE_BACK
 sleep 10
@@ -151,6 +217,7 @@ adb exec-out screencap -p > artifacts/screenshots/flix-movie-player.png
 echo 'Flix initialized movie playback.'
 adb shell input keyevent KEYCODE_BACK
 sleep 4
+dump_ui
 
 # Resolve the same title again through the Download options sheet, save only the
 # English caption sidecar, and wait for Android DownloadManager to finish.
