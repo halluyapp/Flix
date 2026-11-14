@@ -10,6 +10,8 @@ class NetflixTheme {
   static const Color grey = Color(0xFFA3A3A3);
   static const Color darkGrey = Color(0xFF4A4A4A);
   static const Color matchGreen = Color(0xFF46D369);
+  static const Color netflixRed = red;
+  static const Color netflixBlack = background;
 
   static ThemeData get darkTheme {
     return ThemeData(

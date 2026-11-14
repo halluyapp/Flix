@@ -24,7 +24,9 @@ class ZarhostingService {
   static String normalizeTitle(String raw) {
     return raw
         .toLowerCase()
-        .replaceAll(RegExp(r'[\s\-_:,.!?\'"\(\)\[\]]+'), ' ')
+        .replaceAll("'", "")
+        .replaceAll('"', '')
+        .replaceAll(RegExp(r'[\s\-_:,.!?\(\)\[\]]+'), ' ')
         .replaceAll(RegExp(r'[^a-z0-9 ]'), '')
         .trim();
   }
