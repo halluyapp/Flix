@@ -50,7 +50,34 @@ jobs:
         run: flutter pub get
 
       - name: Verify analyzer
-        run: flutter analyze --no-fatal-infos --no-fatal-warnings
+        id: analyze
+        run: |
+          set +e
+          mkdir -p artifacts/analyzer
+          flutter analyze --no-fatal-infos --no-fatal-warnings --machine > artifacts/analyzer/report.txt 2>&1
+          analyze_status=$?
+          cat artifacts/analyzer/report.txt
+          python3 - <<'PY'
+          from pathlib import Path
+
+          for raw in Path('artifacts/analyzer/report.txt').read_text().splitlines():
+              fields = raw.split('|', 7)
+              if len(fields) != 8 or fields[0] not in {'ERROR', 'WARNING', 'INFO'}:
+                  continue
+              severity, issue_type, code, file, line, column, length, message = fields
+              command = {'ERROR': 'error', 'WARNING': 'warning', 'INFO': 'notice'}[severity]
+              print(f'::{command} file={file},line={line},col={column}::{message} [{code}]')
+          PY
+          exit "$analyze_status"
+
+      - name: Upload analyzer report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flix-analyzer-report
+          path: artifacts/analyzer/report.txt
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Run tests
         run: flutter test
