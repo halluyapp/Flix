@@ -6,18 +6,33 @@ import '../core/constants/api_constants.dart';
 import '../models/provider_clip.dart';
 import 'zarhosting_service.dart';
 
+enum ClipsFeedSource { supabase, providerFallback }
+
+class ClipsFeed {
+  final List<ProviderClip> items;
+  final ClipsFeedSource source;
+
+  const ClipsFeed({required this.items, required this.source});
+}
+
 /// Loads the short-film feed through Flix's Supabase Edge Function first.
 ///
 /// The provider fallback keeps Clips available during a Supabase outage. Both
 /// paths run the same strict provider-metadata filter; neither path invents
-/// catalogue entries.
+/// catalogue entries. [ClipsFeed.source] lets the UI report which path served
+/// the visible catalogue.
 class ClipsService {
   final ZarhostingService _provider = ZarhostingService();
 
-  Future<List<ProviderClip>> fetchShortFilms() async {
+  Future<ClipsFeed> fetchShortFilms() async {
     final backendItems = await _fetchFromSupabase();
-    if (backendItems != null && backendItems.isNotEmpty) return backendItems;
-    return _provider.searchShortFilms();
+    if (backendItems != null && backendItems.isNotEmpty) {
+      return ClipsFeed(items: backendItems, source: ClipsFeedSource.supabase);
+    }
+    return ClipsFeed(
+      items: await _provider.searchShortFilms(),
+      source: ClipsFeedSource.providerFallback,
+    );
   }
 
   Future<List<ProviderClip>?> _fetchFromSupabase() async {

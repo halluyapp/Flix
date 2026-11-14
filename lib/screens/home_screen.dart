@@ -106,6 +106,36 @@ class _HomeScreenState extends State<HomeScreen> {
                 letterSpacing: 2,
               ),
             ),
+            if (_trending.isNotEmpty) ...[
+              const SizedBox(width: 8),
+              Tooltip(
+                message: 'Catalogue responses are coming through Flix Supabase',
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF46D369).withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(color: const Color(0xFF46D369).withValues(alpha: 0.5)),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.cloud_done_outlined, color: Color(0xFF46D369), size: 12),
+                      SizedBox(width: 4),
+                      Text(
+                        'SUPABASE',
+                        style: TextStyle(
+                          color: Color(0xFF46D369),
+                          fontSize: 8,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
             const Spacer(),
             IconButton(
               icon: const Icon(Icons.cast, color: Colors.white, size: 22),
@@ -120,7 +150,23 @@ class _HomeScreenState extends State<HomeScreen> {
               },
               child: CircleAvatar(
                 radius: 14,
-                backgroundImage: NetworkImage(userState.currentProfile.avatarUrl),
+                backgroundColor: const Color(0xFFE50914),
+                child: ClipOval(
+                  child: Image.network(
+                    userState.currentProfile.avatarUrl,
+                    width: 28,
+                    height: 28,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => Center(
+                      child: Text(
+                        userState.currentProfile.name.isNotEmpty
+                            ? userState.currentProfile.name[0].toUpperCase()
+                            : '?',
+                        style: const TextStyle(color: Colors.white, fontSize: 13),
+                      ),
+                    ),
+                  ),
+                ),
               ),
             ),
           ],

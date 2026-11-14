@@ -2,7 +2,7 @@
 
 Flix is an original Flutter streaming-discovery app for Android. It combines a TMDB catalogue, a verified short-film **Clips** feed, and playback through the configured Zarhosting provider, with its own brand identity and product scope.
 
-The Android-emulator screenshot is produced by CI and published as the `flix-readme-screenshot` workflow artifact.
+The GitHub Actions workflow launches the app in an Android emulator, exercises Home and Clips, and uploads both screenshots as the `flix-readme-screenshot` artifact. On Home and Clips, the `SUPABASE`/`SUPABASE FEED` badge identifies responses served through Flix's Edge Functions.
 
 ## What is implemented
 

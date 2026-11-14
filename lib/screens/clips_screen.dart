@@ -22,6 +22,7 @@ class _ClipsScreenState extends State<ClipsScreen> {
   bool _isLoading = true;
   bool _isRefreshing = false;
   String? _loadError;
+  ClipsFeedSource? _feedSource;
   int _currentPage = 0;
 
   @override
@@ -41,10 +42,11 @@ class _ClipsScreenState extends State<ClipsScreen> {
     }
 
     try {
-      final clips = await _clipsService.fetchShortFilms();
+      final feed = await _clipsService.fetchShortFilms();
       if (!mounted) return;
       setState(() {
-        _clips = clips;
+        _clips = feed.items;
+        _feedSource = feed.source;
         _isLoading = false;
         _isRefreshing = false;
         _loadError = null;
@@ -113,6 +115,11 @@ class _ClipsScreenState extends State<ClipsScreen> {
                         ),
                       ),
                       Positioned(
+                        left: 18,
+                        top: 48,
+                        child: _buildFeedSourceBadge(),
+                      ),
+                      Positioned(
                         top: 4,
                         right: 8,
                         child: IconButton(
@@ -155,6 +162,48 @@ class _ClipsScreenState extends State<ClipsScreen> {
                         ),
                     ],
                   ),
+      ),
+    );
+  }
+
+  Widget _buildFeedSourceBadge() {
+    final fromSupabase = _feedSource == ClipsFeedSource.supabase;
+    final label = switch (_feedSource) {
+      ClipsFeedSource.supabase => 'SUPABASE FEED',
+      ClipsFeedSource.providerFallback => 'DIRECT PROVIDER FALLBACK',
+      null => 'CONNECTING TO CATALOGUE',
+    };
+    final color = fromSupabase ? const Color(0xFF46D369) : Colors.white70;
+
+    return Semantics(
+      label: 'Clips catalogue source: $label',
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.68),
+          borderRadius: BorderRadius.circular(4),
+          border: Border.all(color: color.withValues(alpha: 0.55)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              fromSupabase ? Icons.cloud_done_outlined : Icons.cloud_outlined,
+              color: color,
+              size: 13,
+            ),
+            const SizedBox(width: 5),
+            Text(
+              label,
+              style: TextStyle(
+                color: color,
+                fontSize: 9,
+                fontWeight: FontWeight.w800,
+                letterSpacing: 0.7,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

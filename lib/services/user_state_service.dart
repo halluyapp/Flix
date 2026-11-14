@@ -82,8 +82,15 @@ class UserStateService extends ChangeNotifier {
   List<WatchProgress> get continueWatching => List.unmodifiable(_continueWatching);
 
   Future<void> init() async {
-    _prefs = await SharedPreferences.getInstance();
-    _loadFromLocal();
+    try {
+      _prefs = await SharedPreferences.getInstance();
+      _loadFromLocal();
+    } catch (error, stackTrace) {
+      debugPrint('Flix startup: local preferences unavailable: $error\n$stackTrace');
+      // Keep the default in-memory profile so a storage/plugin issue cannot
+      // prevent the app from reaching its first screen.
+      _prefs = null;
+    }
   }
 
   void _loadFromLocal() {

@@ -7,7 +7,11 @@ import 'screens/splash_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+  try {
+    await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+  } catch (error, stackTrace) {
+    debugPrint('Flix startup: orientation setup failed: $error\n$stackTrace');
+  }
 
   final userState = UserStateService();
   await userState.init();
