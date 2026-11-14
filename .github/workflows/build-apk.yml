@@ -112,7 +112,7 @@ jobs:
     name: Install, launch, and capture Android diagnostics
     needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 35
 
     steps:
       - name: Checkout smoke-test script
@@ -134,7 +134,7 @@ jobs:
           sudo udevadm trigger --name-match=kvm
 
       - name: Install, launch, and capture on Android emulator
-        timeout-minutes: 15
+        timeout-minutes: 25
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34

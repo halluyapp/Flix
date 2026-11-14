@@ -110,6 +110,9 @@ done
 adb shell input tap "$((width * 10 / 100))" "$((height * 93 / 100))"
 sleep 2
 adb shell pidof "$FLIX_PACKAGE" >/dev/null
+
+bash .github/scripts/media-smoke.sh
+
 adb logcat -b crash -d -v time > artifacts/emulator/crash-buffer.txt
 
 if grep -E 'FATAL EXCEPTION|Fatal signal' artifacts/emulator/crash-buffer.txt; then
