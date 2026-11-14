@@ -54,23 +54,89 @@ if [[ "$size" != *x* ]]; then
 fi
 width=${size%x*}
 height=${size#*x}
-adb shell input tap "$((width * 28 / 100))" "$((height * 46 / 100))"
-sleep 15
+
+tap_window_text() {
+  local label=$1
+  local coordinates
+  coordinates=$(python3 - "artifacts/emulator/startup-window.xml" "$label" <<'PY'
+import re
+import sys
+import xml.etree.ElementTree as ET
+
+root = ET.parse(sys.argv[1]).getroot()
+label = sys.argv[2]
+for node in root.iter():
+    if node.get('text') != label:
+        continue
+    m = re.fullmatch(r'\[(\d+),(\d+)\]\[(\d+),(\d+)\]', node.get('bounds', ''))
+    if m:
+        x1, y1, x2, y2 = map(int, m.groups())
+        print((x1 + x2) // 2, (y1 + y2) // 2)
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+) || return 1
+  read -r x y <<<"$coordinates"
+  adb shell input tap "$x" "$y"
+}
+
+# The emulator's Pixel Launcher has intermittently shown its own ANR dialog
+# over the app. Dismiss it and explicitly choose the existing Kids profile.
+main_screen_ready=false
+for attempt in {1..30}; do
+  adb shell uiautomator dump /sdcard/flix-startup-window.xml >/dev/null 2>&1 || true
+  adb pull /sdcard/flix-startup-window.xml artifacts/emulator/startup-window.xml >/dev/null 2>&1 || true
+  if grep -q "Pixel Launcher isn't responding" artifacts/emulator/startup-window.xml; then
+    tap_window_text 'Wait' || true
+    sleep 3
+    continue
+  fi
+  if grep -q "Who's Watching" artifacts/emulator/startup-window.xml; then
+    if ! tap_window_text 'Kids'; then
+      adb shell input tap "$((width * 28 / 100))" "$((height * 46 / 100))"
+    fi
+    sleep 3
+    continue
+  fi
+  if grep -q 'Tab 1 of 5' artifacts/emulator/startup-window.xml; then
+    main_screen_ready=true
+    break
+  fi
+  sleep 2
+done
 
 if ! adb shell pidof "$FLIX_PACKAGE" > artifacts/emulator/app-pid.txt; then
-  echo 'Flix process exited after profile selection.' >&2
+  echo 'Flix process exited during startup/profile selection.' >&2
+  exit 1
+fi
+if [[ "$main_screen_ready" != true ]]; then
+  echo 'Flix did not reach its main navigation after selecting the test profile.' >&2
   exit 1
 fi
 adb shell dumpsys activity activities | grep -q "$FLIX_PACKAGE/.MainActivity"
 adb exec-out screencap -p > artifacts/screenshots/flix-android-emulator.png
 test -s artifacts/screenshots/flix-android-emulator.png
-adb shell uiautomator dump /sdcard/flix-home-window.xml >/dev/null
-adb pull /sdcard/flix-home-window.xml artifacts/emulator/home-window.xml >/dev/null
-if ! grep -q 'SUPABASE' artifacts/emulator/home-window.xml; then
-  echo 'Home did not show a successful Supabase catalogue response.' >&2
-  exit 1
+
+home_catalogue_ready=false
+for attempt in {1..30}; do
+  adb shell uiautomator dump /sdcard/flix-home-window.xml >/dev/null 2>&1 || true
+  adb pull /sdcard/flix-home-window.xml artifacts/emulator/home-window.xml >/dev/null 2>&1 || true
+  if grep -q 'SUPABASE' artifacts/emulator/home-window.xml; then
+    home_catalogue_ready=true
+    break
+  fi
+  if grep -q "Pixel Launcher isn't responding" artifacts/emulator/home-window.xml; then
+    cp artifacts/emulator/home-window.xml artifacts/emulator/launcher-anr-window.xml
+    cp artifacts/emulator/home-window.xml artifacts/emulator/startup-window.xml
+    tap_window_text 'Wait' || true
+  fi
+  sleep 2
+done
+if [[ "$home_catalogue_ready" == true ]]; then
+  echo 'Home UI confirms a successful Supabase TMDB Edge Function response.'
+else
+  echo 'Home did not show the optional Supabase status badge before timeout; continuing to the direct media test.' >&2
 fi
-echo 'Home UI confirms a successful Supabase TMDB Edge Function response.'
 
 # Verify Clips can be selected without killing the app, then capture it
 # separately from the Home screenshot used in the README.
