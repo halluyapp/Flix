@@ -64,12 +64,34 @@ fi
 adb shell dumpsys activity activities | grep -q "$FLIX_PACKAGE/.MainActivity"
 adb exec-out screencap -p > artifacts/screenshots/flix-android-emulator.png
 test -s artifacts/screenshots/flix-android-emulator.png
+adb shell uiautomator dump /sdcard/flix-home-window.xml >/dev/null
+adb pull /sdcard/flix-home-window.xml artifacts/emulator/home-window.xml >/dev/null
+if ! grep -q 'SUPABASE' artifacts/emulator/home-window.xml; then
+  echo 'Home did not show a successful Supabase catalogue response.' >&2
+  exit 1
+fi
+echo 'Home UI confirms a successful Supabase TMDB Edge Function response.'
 
 # Verify Clips can be selected without killing the app, then capture it
 # separately from the Home screenshot used in the README.
 adb shell input tap "$((width * 30 / 100))" "$((height * 93 / 100))"
 sleep 4
 adb shell pidof "$FLIX_PACKAGE" > artifacts/emulator/app-pid.txt
+feed_source_confirmed=false
+for attempt in {1..8}; do
+  adb shell uiautomator dump /sdcard/flix-clips-window.xml >/dev/null
+  adb pull /sdcard/flix-clips-window.xml artifacts/emulator/clips-window.xml >/dev/null
+  if grep -q 'SUPABASE FEED' artifacts/emulator/clips-window.xml; then
+    feed_source_confirmed=true
+    break
+  fi
+  sleep 2
+done
+if [[ "$feed_source_confirmed" != true ]]; then
+  echo 'Clips did not report Supabase as the source of its feed.' >&2
+  exit 1
+fi
+echo 'Clips UI confirms the Supabase feed source.'
 adb exec-out screencap -p > artifacts/screenshots/flix-clips-emulator.png
 test -s artifacts/screenshots/flix-clips-emulator.png
 adb shell input tap "$((width * 10 / 100))" "$((height * 93 / 100))"

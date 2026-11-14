@@ -2,7 +2,7 @@
 
 Flix is an original Flutter streaming-discovery app for Android. It combines a TMDB catalogue, a verified short-film **Clips** feed, and playback through the configured Zarhosting provider, with its own brand identity and product scope.
 
-The GitHub Actions workflow launches the app in an Android emulator, exercises Home and Clips, and uploads both screenshots as the `flix-readme-screenshot` artifact. On Home and Clips, the `SUPABASE`/`SUPABASE FEED` badge identifies responses served through Flix's Edge Functions.
+The GitHub Actions workflow installs the APK in an Android emulator, launches Flix, exercises Home and Clips, verifies both source badges in the Android UI hierarchy, and uploads genuine emulator screenshots as the `flix-readme-screenshot` artifact. Home shows `SUPABASE` only after a valid HTTP 200 JSON response from Flix's TMDB Edge Function during that load; Clips reports whether its items came from Supabase or the direct-provider fallback. These badges verify catalogue API reachability, not an authenticated user session or cloud-synced viewer state.
 
 ## What is implemented
 
@@ -16,14 +16,14 @@ The GitHub Actions workflow launches the app in an Android emulator, exercises H
 
 Flix's dedicated project is **Flix** (`jewtsdupzwwkdoudwgyk`, `eu-west-2`). The repository is linked to this project in `supabase/config.toml`.
 
-- `supabase/migrations/20261114154911_flix_platform_hardening.sql` defines profiles, watch progress, My List, ratings, profile settings, release reminders, and a server-only stream cache, with row-level security and profile ownership checks. This migration has been applied to the dedicated project.
+- `supabase/migrations/20261114154911_flix_platform_hardening.sql` is the repository's intended schema for profiles, watch progress, My List, ratings, profile settings, release reminders, and a server-only stream cache, with row-level security and profile ownership checks. The remote project history contains version `20261114154911`; its applied SQL was not compared with this file during this verification.
 - `supabase/functions/clips-feed` is deployed and returns provider-backed short-film records after applying the strict metadata filter. The app falls back to the same filter against the provider if Supabase is unavailable.
 - `supabase/functions/tmdb-proxy` is deployed with a fixed endpoint allowlist and a per-isolate request limit. TMDB requests are proxied through Supabase so the bearer token is not compiled into the APK. The current `TMDB_READ_TOKEN` is a Supabase Edge Function secret.
 - No Supabase API, service-role, or secret key is included in the app. The public Clips endpoint returns catalogue metadata only.
 
 **Credential rotation:** this TMDB read token was present in the repository before this change, so rotate it with TMDB and update the Supabase `TMDB_READ_TOKEN` secret before a public/store release. Removing it from the current Flutter source does not erase prior Git history.
 
-**Viewer-state limitation:** profiles, My List, and watch progress are still stored on-device by the current Flutter app. The Supabase tables and RLS are ready, but account sign-in and cross-device synchronization are not wired into the UI yet. No cloud sync is claimed.
+**Viewer-state limitation:** profiles, My List, and watch progress are still stored on-device by the current Flutter app. The app does not yet initialize Supabase Auth, create a signed-in session, or read/write those user records through Supabase; there is no cross-device synchronization. A healthy Supabase Auth service and reachable catalogue Edge Functions do not mean the app has user authentication or cloud sync.
 
 ## Build and verify
 

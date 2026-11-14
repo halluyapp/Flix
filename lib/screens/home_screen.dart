@@ -19,6 +19,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   final TmdbService _tmdbService = TmdbService();
   bool _isLoading = true;
+  bool _hasSupabaseConnection = false;
 
   MediaItem? _heroItem;
   List<MediaItem> _trending = [];
@@ -36,6 +37,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _loadFeed() async {
+    _tmdbService.resetSupabaseConnectionStatus();
     try {
       final trendingFuture = _tmdbService.getTrending();
       final top10Future = _tmdbService.getTop10Today();
@@ -64,6 +66,7 @@ class _HomeScreenState extends State<HomeScreen> {
           _kdrama = results[4];
           _nollywood = results[5];
           _anime = results[6];
+          _hasSupabaseConnection = _tmdbService.hasSuccessfulSupabaseResponse;
 
           if (_trending.isNotEmpty) {
             _heroItem = _trending.first;
@@ -72,7 +75,12 @@ class _HomeScreenState extends State<HomeScreen> {
         });
       }
     } catch (_) {
-      if (mounted) setState(() => _isLoading = false);
+      if (mounted) {
+        setState(() {
+          _hasSupabaseConnection = _tmdbService.hasSuccessfulSupabaseResponse;
+          _isLoading = false;
+        });
+      }
     }
   }
 
@@ -106,10 +114,10 @@ class _HomeScreenState extends State<HomeScreen> {
                 letterSpacing: 2,
               ),
             ),
-            if (_trending.isNotEmpty) ...[
+            if (_hasSupabaseConnection) ...[
               const SizedBox(width: 8),
               Tooltip(
-                message: 'Catalogue responses are coming through Flix Supabase',
+                message: 'A catalogue API request succeeded through Flix Supabase',
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
                   decoration: BoxDecoration(

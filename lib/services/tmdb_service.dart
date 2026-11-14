@@ -5,6 +5,19 @@ import '../models/media_item.dart';
 import '../models/episode.dart';
 
 class TmdbService {
+  final http.Client? _client;
+  bool _hasSuccessfulSupabaseResponse = false;
+
+  TmdbService({http.Client? client}) : _client = client;
+
+  /// True after a valid HTTP 200 JSON response from Flix's Supabase Edge Function.
+  bool get hasSuccessfulSupabaseResponse => _hasSuccessfulSupabaseResponse;
+
+  /// Starts a fresh connection check for the next group of catalogue requests.
+  void resetSupabaseConnectionStatus() {
+    _hasSuccessfulSupabaseResponse = false;
+  }
+
   /// Calls Flix's server-side TMDB proxy. The TMDB bearer token is never
   /// embedded in or sent by the mobile client.
   Future<dynamic> _fetchTmdb(String path, [Map<String, String>? queryParams]) async {
@@ -14,11 +27,16 @@ class TmdbService {
       final query = Map<String, String>.from(queryParams ?? const <String, String>{});
       query['path'] = path;
       final uri = Uri.parse(ApiConstants.tmdbProxyUrl).replace(queryParameters: query);
-      final response = await http
-          .get(uri, headers: const {'Accept': 'application/json'})
-          .timeout(const Duration(seconds: 12));
+      const headers = {'Accept': 'application/json'};
+      final client = _client;
+      final request = client == null
+          ? http.get(uri, headers: headers)
+          : client.get(uri, headers: headers);
+      final response = await request.timeout(const Duration(seconds: 12));
       if (response.statusCode == 200) {
-        return json.decode(response.body);
+        final decoded = json.decode(response.body);
+        _hasSuccessfulSupabaseResponse = true;
+        return decoded;
       }
     } catch (_) {
       // Network failure or malformed response is rendered as an empty state.
