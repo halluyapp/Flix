@@ -50,7 +50,7 @@ class _ClipsScreenState extends State<ClipsScreen> {
         _isLoading = false;
         _isRefreshing = false;
         _loadError = null;
-        if (_currentPage >= clips.length) _currentPage = 0;
+        if (_currentPage >= feed.items.length) _currentPage = 0;
       });
     } catch (_) {
       if (!mounted) return;
