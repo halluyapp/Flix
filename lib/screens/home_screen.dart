@@ -7,6 +7,7 @@ import '../widgets/hero_billboard.dart';
 import '../widgets/continue_watching_rail.dart';
 import '../widgets/top_10_rail.dart';
 import '../widgets/content_rail.dart';
+import 'profile_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -21,10 +22,12 @@ class _HomeScreenState extends State<HomeScreen> {
 
   MediaItem? _heroItem;
   List<MediaItem> _trending = [];
+  List<MediaItem> _top10 = [];
   List<MediaItem> _topRated = [];
   List<MediaItem> _popularTv = [];
-  List<MediaItem> _actionMovies = [];
-  List<MediaItem> _kDrama = [];
+  List<MediaItem> _kdrama = [];
+  List<MediaItem> _nollywood = [];
+  List<MediaItem> _anime = [];
 
   @override
   void initState() {
@@ -35,32 +38,41 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<void> _loadFeed() async {
     try {
       final trendingFuture = _tmdbService.getTrending();
+      final top10Future = _tmdbService.getTop10Today();
       final topRatedFuture = _tmdbService.getTopRated();
       final popularTvFuture = _tmdbService.getPopularTv();
-      final actionFuture = _tmdbService.getByGenre(28); // 28 = Action
-      final dramaFuture = _tmdbService.getByGenre(18, isTv: true); // 18 = Drama
+      final kdramaFuture = _tmdbService.getKdramas();
+      final nollywoodFuture = _tmdbService.getNollywood();
+      final animeFuture = _tmdbService.getAnime();
 
       final results = await Future.wait([
         trendingFuture,
+        top10Future,
         topRatedFuture,
         popularTvFuture,
-        actionFuture,
-        dramaFuture,
+        kdramaFuture,
+        nollywoodFuture,
+        animeFuture,
       ]);
 
-      setState(() {
-        _trending = results[0];
-        _topRated = results[1];
-        _popularTv = results[2];
-        _actionMovies = results[3];
-        _kDrama = results[4];
-        if (_trending.isNotEmpty) {
-          _heroItem = _trending.first;
-        }
-        _isLoading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _trending = results[0];
+          _top10 = results[1];
+          _topRated = results[2];
+          _popularTv = results[3];
+          _kdrama = results[4];
+          _nollywood = results[5];
+          _anime = results[6];
+
+          if (_trending.isNotEmpty) {
+            _heroItem = _trending.first;
+          }
+          _isLoading = false;
+        });
+      }
     } catch (_) {
-      setState(() => _isLoading = false);
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -100,9 +112,16 @@ class _HomeScreenState extends State<HomeScreen> {
               onPressed: () {},
             ),
             const SizedBox(width: 4),
-            CircleAvatar(
-              radius: 14,
-              backgroundImage: NetworkImage(userState.currentProfile.avatarUrl),
+            GestureDetector(
+              onTap: () {
+                Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const ProfileScreen()),
+                );
+              },
+              child: CircleAvatar(
+                radius: 14,
+                backgroundImage: NetworkImage(userState.currentProfile.avatarUrl),
+              ),
             ),
           ],
         ),
@@ -132,13 +151,17 @@ class _HomeScreenState extends State<HomeScreen> {
             children: [
               HeroBillboard(item: _heroItem),
               const SizedBox(height: 12),
-              ContinueWatchingRail(items: userState.continueWatching),
-              Top10Rail(title: 'Top 10 in Movies Today', items: _trending),
+              if (userState.continueWatching.isNotEmpty)
+                ContinueWatchingRail(items: userState.continueWatching),
+              if (_top10.isNotEmpty)
+                Top10Rail(title: 'Top 10 Today', items: _top10),
               ContentRail(title: 'Trending Now', items: _trending),
               ContentRail(title: 'Popular on Flix', items: _popularTv),
+              ContentRail(title: 'Korean Dramas', items: _kdrama),
+              if (_nollywood.isNotEmpty)
+                ContentRail(title: 'Nollywood Cinema', items: _nollywood),
+              ContentRail(title: 'Anime Action', items: _anime),
               ContentRail(title: 'Critically Acclaimed', items: _topRated),
-              ContentRail(title: 'Action & Adventure', items: _actionMovies),
-              ContentRail(title: 'Compelling TV Dramas', items: _kDrama),
             ],
           ),
         ),

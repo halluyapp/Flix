@@ -3,11 +3,13 @@ name: Build Flix Android APK
 on:
   push:
     branches: [ main ]
+    tags:
+      - 'v*'
   workflow_dispatch:
 
 jobs:
   build:
-    name: Build Release APK
+    name: Build Release APKs
     runs-on: ubuntu-latest
 
     steps:
@@ -23,34 +25,69 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.x'
+          flutter-version: '3.27.4'
           channel: 'stable'
           cache: true
+
+      - name: Cache Gradle Packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
 
       - name: Install Dependencies
         run: flutter pub get
 
-      - name: Build Release APK
+      - name: Verify Analyzer
+        run: flutter analyze
+
+      - name: Run Tests
+        run: flutter test
+
+      - name: Build Split-per-ABI Release APKs
+        run: flutter build apk --release --split-per-abi
+
+      - name: Build Universal Release APK
         run: flutter build apk --release
 
-      - name: Upload APK Artifact
+      - name: Upload Split APKs Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: flix-release-apk
+          name: flix-abi-apks
+          path: |
+            build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
+            build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+            build/app/outputs/flutter-apk/app-x86_64-release.apk
+
+      - name: Upload Universal APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flix-universal-apk
           path: build/app/outputs/flutter-apk/app-release.apk
 
       - name: Publish GitHub Release
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: build/app/outputs/flutter-apk/app-release.apk
+          files: |
+            build/app/outputs/flutter-apk/app-release.apk
+            build/app/outputs/flutter-apk/app-arm64-v8a-release.apk
+            build/app/outputs/flutter-apk/app-armeabi-v7a-release.apk
+            build/app/outputs/flutter-apk/app-x86_64-release.apk
           tag_name: v1.0.${{ github.run_number }}
-          name: "Flix Android Release v1.0.${{ github.run_number }}"
+          name: "Flix Production Release v1.0.${{ github.run_number }}"
           body: |
-            ### 🎬 Flix — Automated Release Build
-            - Built with Flutter 3.24
-            - Powered by TMDB catalogue & Zarhosting stream resolver
-            - Cinema-grade Netflix dark UI with full-screen player
+            ### 🎬 Flix Production Release
+            - **Platform:** Flutter 3.27 Android (AGP 8.7.2, Gradle 8.10.2, Java 17)
+            - **Architectures:** Universal, ARM64-v8a, ARMv7, x86_64
+            - **Catalogue:** TMDB v3 API (Trending, Top 10, K-Drama, Nollywood, Anime, Discovery)
+            - **Streaming:** Hardened Zarhosting Media Provider with ExoPlayer headers profile
+            - **Backend:** Lovable Cloud / Supabase Auth, Profiles (up to 5, PIN hash), Watch Progress, My List, Stream Cache
+            - **Player:** Cinema-grade full-screen player with gestures, audio/subtitles, episode drawer, and binge countdown
           draft: false
           prerelease: false
         env:
