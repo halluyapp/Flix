@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'clips_screen.dart';
 import 'home_screen.dart';
 import 'new_and_hot_screen.dart';
 import 'search_screen.dart';
@@ -16,6 +17,7 @@ class _MainScreenState extends State<MainScreen> {
 
   final List<Widget> _screens = const [
     HomeScreen(),
+    ClipsScreen(),
     NewAndHotScreen(),
     SearchScreen(),
     MyFlixScreen(),
@@ -34,6 +36,7 @@ class _MainScreenState extends State<MainScreen> {
         onTap: (index) => setState(() => _currentIndex = index),
         items: const [
           BottomNavigationBarItem(icon: Icon(Icons.home_filled), label: 'Home'),
+          BottomNavigationBarItem(icon: Icon(Icons.play_circle_outline), label: 'Clips'),
           BottomNavigationBarItem(icon: Icon(Icons.video_library_outlined), label: 'New & Hot'),
           BottomNavigationBarItem(icon: Icon(Icons.search), label: 'Search'),
           BottomNavigationBarItem(icon: Icon(Icons.person_outline), label: 'My Flix'),

@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/media_item.dart';
-import '../core/constants/api_constants.dart';
 import '../services/tmdb_service.dart';
 import '../services/user_state_service.dart';
 import '../widgets/hero_billboard.dart';
@@ -20,6 +19,7 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   final TmdbService _tmdbService = TmdbService();
   bool _isLoading = true;
+  bool _hasSupabaseConnection = false;
 
   MediaItem? _heroItem;
   List<MediaItem> _trending = [];
@@ -37,6 +37,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _loadFeed() async {
+    _tmdbService.resetSupabaseConnectionStatus();
     try {
       final trendingFuture = _tmdbService.getTrending();
       final top10Future = _tmdbService.getTop10Today();
@@ -65,6 +66,7 @@ class _HomeScreenState extends State<HomeScreen> {
           _kdrama = results[4];
           _nollywood = results[5];
           _anime = results[6];
+          _hasSupabaseConnection = _tmdbService.hasSuccessfulSupabaseResponse;
 
           if (_trending.isNotEmpty) {
             _heroItem = _trending.first;
@@ -73,7 +75,12 @@ class _HomeScreenState extends State<HomeScreen> {
         });
       }
     } catch (_) {
-      if (mounted) setState(() => _isLoading = false);
+      if (mounted) {
+        setState(() {
+          _hasSupabaseConnection = _tmdbService.hasSuccessfulSupabaseResponse;
+          _isLoading = false;
+        });
+      }
     }
   }
 
@@ -107,6 +114,36 @@ class _HomeScreenState extends State<HomeScreen> {
                 letterSpacing: 2,
               ),
             ),
+            if (_hasSupabaseConnection) ...[
+              const SizedBox(width: 8),
+              Tooltip(
+                message: 'A catalogue API request succeeded through Flix Supabase',
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF46D369).withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(color: const Color(0xFF46D369).withValues(alpha: 0.5)),
+                  ),
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.cloud_done_outlined, color: Color(0xFF46D369), size: 12),
+                      SizedBox(width: 4),
+                      Text(
+                        'SUPABASE',
+                        style: TextStyle(
+                          color: Color(0xFF46D369),
+                          fontSize: 8,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 0.5,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
             const Spacer(),
             IconButton(
               icon: const Icon(Icons.cast, color: Colors.white, size: 22),
@@ -121,7 +158,23 @@ class _HomeScreenState extends State<HomeScreen> {
               },
               child: CircleAvatar(
                 radius: 14,
-                backgroundImage: NetworkImage(userState.currentProfile.avatarUrl),
+                backgroundColor: const Color(0xFFE50914),
+                child: ClipOval(
+                  child: Image.network(
+                    userState.currentProfile.avatarUrl,
+                    width: 28,
+                    height: 28,
+                    fit: BoxFit.cover,
+                    errorBuilder: (_, __, ___) => Center(
+                      child: Text(
+                        userState.currentProfile.name.isNotEmpty
+                            ? userState.currentProfile.name[0].toUpperCase()
+                            : '?',
+                        style: const TextStyle(color: Colors.white, fontSize: 13),
+                      ),
+                    ),
+                  ),
+                ),
               ),
             ),
           ],
@@ -188,20 +241,18 @@ class _HomeScreenState extends State<HomeScreen> {
         borderRadius: BorderRadius.circular(8),
         border: Border.all(color: const Color(0xFF2B2B2B)),
       ),
-      child: Column(
+      child: const Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
+          Text(
             'Catalogue unavailable',
             style: TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.bold),
           ),
-          const SizedBox(height: 6),
+          SizedBox(height: 6),
           Text(
-            ApiConstants.hasTmdbCredentials
-                ? 'TMDB could not be reached. Check your connection and pull to refresh.'
-                : 'No TMDB credentials were compiled into this build. Rebuild with '
-                    '--dart-define=TMDB_API_KEY=your_key to load the catalogue.',
-            style: const TextStyle(color: Color(0xFFA3A3A3), fontSize: 12, height: 1.4),
+            'Flix could not reach its Supabase-backed catalogue. Check your connection and pull to refresh. '
+                'If this continues, verify the TMDB_READ_TOKEN secret in the Flix Supabase project.',
+            style: TextStyle(color: Color(0xFFA3A3A3), fontSize: 12, height: 1.4),
           ),
         ],
       ),

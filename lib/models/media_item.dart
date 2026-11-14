@@ -5,6 +5,10 @@ class MediaItem {
   final String overview;
   final String? posterPath;
   final String? backdropPath;
+  final String? posterUrlOverride;
+  final String? backdropUrlOverride;
+  final String? providerSubjectId;
+  final String? providerDetailPath;
   final double voteAverage;
   final String releaseDate;
   final String mediaType; // 'movie' or 'tv'
@@ -17,6 +21,10 @@ class MediaItem {
     required this.overview,
     this.posterPath,
     this.backdropPath,
+    this.posterUrlOverride,
+    this.backdropUrlOverride,
+    this.providerSubjectId,
+    this.providerDetailPath,
     required this.voteAverage,
     required this.releaseDate,
     required this.mediaType,
@@ -35,6 +43,10 @@ class MediaItem {
       overview: (json['overview'] as String?) ?? '',
       posterPath: json['poster_path'] as String?,
       backdropPath: json['backdrop_path'] as String?,
+      posterUrlOverride: json['poster_url_override'] as String?,
+      backdropUrlOverride: json['backdrop_url_override'] as String?,
+      providerSubjectId: json['provider_subject_id'] as String?,
+      providerDetailPath: json['provider_detail_path'] as String?,
       voteAverage: (json['vote_average'] as num?)?.toDouble() ?? 0.0,
       releaseDate: releaseDate as String,
       mediaType: mediaType as String,
@@ -52,13 +64,13 @@ class MediaItem {
     return 0;
   }
 
-  String get posterUrl => posterPath != null
+  String get posterUrl => posterUrlOverride ?? (posterPath != null
       ? 'https://image.tmdb.org/t/p/w500$posterPath'
-      : 'https://images.unsplash.com/photo-1594909122845-11baa439b7bf?w=500&auto=format&fit=crop&q=60';
+      : 'https://images.unsplash.com/photo-1594909122845-11baa439b7bf?w=500&auto=format&fit=crop&q=60');
 
-  String get backdropUrl => backdropPath != null
+  String get backdropUrl => backdropUrlOverride ?? (backdropPath != null
       ? 'https://image.tmdb.org/t/p/original$backdropPath'
-      : posterUrl;
+      : posterUrl);
 
   int get matchScore => (voteAverage * 10).clamp(65, 99).toInt();
 }

@@ -35,6 +35,10 @@ class WatchProgress {
       'overview': item.overview,
       'poster_path': item.posterPath,
       'backdrop_path': item.backdropPath,
+      'poster_url_override': item.posterUrlOverride,
+      'backdrop_url_override': item.backdropUrlOverride,
+      'provider_subject_id': item.providerSubjectId,
+      'provider_detail_path': item.providerDetailPath,
       'vote_average': item.voteAverage,
       'release_date': item.releaseDate,
       'media_type': item.mediaType,
@@ -78,8 +82,15 @@ class UserStateService extends ChangeNotifier {
   List<WatchProgress> get continueWatching => List.unmodifiable(_continueWatching);
 
   Future<void> init() async {
-    _prefs = await SharedPreferences.getInstance();
-    _loadFromLocal();
+    try {
+      _prefs = await SharedPreferences.getInstance();
+      _loadFromLocal();
+    } catch (error, stackTrace) {
+      debugPrint('Flix startup: local preferences unavailable: $error\n$stackTrace');
+      // Keep the default in-memory profile so a storage/plugin issue cannot
+      // prevent the app from reaching its first screen.
+      _prefs = null;
+    }
   }
 
   void _loadFromLocal() {
@@ -153,6 +164,10 @@ class UserStateService extends ChangeNotifier {
         'overview': m.overview,
         'poster_path': m.posterPath,
         'backdrop_path': m.backdropPath,
+        'poster_url_override': m.posterUrlOverride,
+        'backdrop_url_override': m.backdropUrlOverride,
+        'provider_subject_id': m.providerSubjectId,
+        'provider_detail_path': m.providerDetailPath,
         'vote_average': m.voteAverage,
         'release_date': m.releaseDate,
         'media_type': m.mediaType,

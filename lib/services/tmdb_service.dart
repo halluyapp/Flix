@@ -5,35 +5,41 @@ import '../models/media_item.dart';
 import '../models/episode.dart';
 
 class TmdbService {
-  Map<String, String> get _headers {
-    final h = {'Accept': 'application/json'};
-    if (ApiConstants.tmdbReadToken.isNotEmpty) {
-      h['Authorization'] = 'Bearer ${ApiConstants.tmdbReadToken}';
-    }
-    return h;
+  final http.Client? _client;
+  bool _hasSuccessfulSupabaseResponse = false;
+
+  TmdbService({http.Client? client}) : _client = client;
+
+  /// True after a valid HTTP 200 JSON response from Flix's Supabase Edge Function.
+  bool get hasSuccessfulSupabaseResponse => _hasSuccessfulSupabaseResponse;
+
+  /// Starts a fresh connection check for the next group of catalogue requests.
+  void resetSupabaseConnectionStatus() {
+    _hasSuccessfulSupabaseResponse = false;
   }
 
-  /// Calls TMDB directly. Returns null when no credentials are configured or
-  /// the request fails, so callers can render an empty state.
+  /// Calls Flix's server-side TMDB proxy. The TMDB bearer token is never
+  /// embedded in or sent by the mobile client.
   Future<dynamic> _fetchTmdb(String path, [Map<String, String>? queryParams]) async {
-    if (!ApiConstants.hasTmdbCredentials) return null;
+    if (ApiConstants.supabaseUrl.isEmpty) return null;
 
     try {
-      final query = Map<String, String>.from(queryParams ?? {});
-      // Send exactly one credential: the bearer token when present, otherwise
-      // the v3 API key.
-      if (ApiConstants.tmdbReadToken.isEmpty &&
-          ApiConstants.tmdbApiKey.isNotEmpty &&
-          !query.containsKey('api_key')) {
-        query['api_key'] = ApiConstants.tmdbApiKey;
-      }
-      final uri = Uri.parse('${ApiConstants.tmdbBaseUrl}$path').replace(queryParameters: query);
-      final res = await http.get(uri, headers: _headers).timeout(const Duration(seconds: 12));
-      if (res.statusCode == 200) {
-        return json.decode(res.body);
+      final query = Map<String, String>.from(queryParams ?? const <String, String>{});
+      query['path'] = path;
+      final uri = Uri.parse(ApiConstants.tmdbProxyUrl).replace(queryParameters: query);
+      const headers = {'Accept': 'application/json'};
+      final client = _client;
+      final request = client == null
+          ? http.get(uri, headers: headers)
+          : client.get(uri, headers: headers);
+      final response = await request.timeout(const Duration(seconds: 12));
+      if (response.statusCode == 200) {
+        final decoded = json.decode(response.body);
+        _hasSuccessfulSupabaseResponse = true;
+        return decoded;
       }
     } catch (_) {
-      // Network failure or malformed response: reported as "no data".
+      // Network failure or malformed response is rendered as an empty state.
     }
 
     return null;
