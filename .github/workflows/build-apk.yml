@@ -54,19 +54,19 @@ jobs:
         run: |
           set +e
           mkdir -p artifacts/analyzer
-          flutter analyze --no-fatal-infos --no-fatal-warnings --machine > artifacts/analyzer/report.txt 2>&1
+          flutter analyze --no-fatal-infos --no-fatal-warnings > artifacts/analyzer/report.txt 2>&1
           analyze_status=$?
           cat artifacts/analyzer/report.txt
           python3 - <<'PY'
           from pathlib import Path
 
-          for raw in Path('artifacts/analyzer/report.txt').read_text().splitlines():
-              fields = raw.split('|', 7)
-              if len(fields) != 8 or fields[0] not in {'ERROR', 'WARNING', 'INFO'}:
-                  continue
-              severity, issue_type, code, file, line, column, length, message = fields
-              command = {'ERROR': 'error', 'WARNING': 'warning', 'INFO': 'notice'}[severity]
-              print(f'::{command} file={file},line={line},col={column}::{message} [{code}]')
+          lines = Path('artifacts/analyzer/report.txt').read_text().splitlines()
+          findings = [line for line in lines if 'error •' in line.lower()]
+          if not findings:
+              findings = lines[-20:]
+          for line in findings[:30]:
+              safe = line.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+              print(f'::error::{safe}')
           PY
           exit "$analyze_status"
 
