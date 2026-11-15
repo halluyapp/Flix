@@ -144,41 +144,33 @@ class UserStateService extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> _saveToLocal() async {
+  /// Saves run through a single chain so an older asynchronous snapshot can
+  /// never land after a newer one. Snapshots are captured at call time.
+  Future<void> _saveChain = Future<void>.value();
+
+  Future<void> _saveToLocal() {
     final prefs = _prefs;
-    if (prefs == null) return;
+    if (prefs == null) return Future<void>.value();
     final pid = _currentProfile.id;
-
-    await prefs.setString(
-      'flix_profiles',
-      json.encode(_profiles.map((p) => p.toJson()).toList()),
-    );
-    await prefs.setString('flix_active_profile_id', pid);
-
-    await prefs.setString(
-      'flix_my_list_$pid',
-      json.encode(_myList.map((m) => {
-        'id': m.id,
-        'title': m.title,
-        'original_title': m.originalTitle,
-        'overview': m.overview,
-        'poster_path': m.posterPath,
-        'backdrop_path': m.backdropPath,
-        'poster_url_override': m.posterUrlOverride,
-        'backdrop_url_override': m.backdropUrlOverride,
-        'provider_subject_id': m.providerSubjectId,
-        'provider_detail_path': m.providerDetailPath,
-        'vote_average': m.voteAverage,
-        'release_date': m.releaseDate,
-        'media_type': m.mediaType,
-        'genre_ids': m.genreIds,
-      }).toList()),
+    final profilesJson =
+        json.encode(_profiles.map((profile) => profile.toJson()).toList());
+    final myListJson =
+        json.encode(_myList.map((item) => item.toJson()).toList());
+    final progressJson = json.encode(
+      _continueWatching.map((entry) => entry.toJson()).toList(),
     );
 
-    await prefs.setString(
-      'flix_progress_$pid',
-      json.encode(_continueWatching.map((w) => w.toJson()).toList()),
-    );
+    _saveChain = _saveChain.then((_) async {
+      try {
+        await prefs.setString('flix_profiles', profilesJson);
+        await prefs.setString('flix_active_profile_id', pid);
+        await prefs.setString('flix_my_list_$pid', myListJson);
+        await prefs.setString('flix_progress_$pid', progressJson);
+      } catch (error) {
+        debugPrint('Flix could not persist profile state: $error');
+      }
+    });
+    return _saveChain;
   }
 
   void setProfile(UserProfile profile) {

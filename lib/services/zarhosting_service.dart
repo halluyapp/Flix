@@ -1,36 +1,24 @@
-import 'dart:convert';
-import 'package:http/http.dart' as http;
 import '../core/constants/api_constants.dart';
-import '../models/stream_source.dart';
+import '../core/provider/provider_failures.dart';
 import '../models/caption_track.dart';
 import '../models/provider_clip.dart';
+import '../models/provider_match.dart';
+import '../models/stream_source.dart';
+import 'provider_matcher.dart';
+import 'provider_payload.dart';
+import 'zarhosting_api_client.dart';
 
-class ProviderException implements Exception {
-  final String message;
-
-  const ProviderException(this.message);
-
-  @override
-  String toString() => message;
-}
-
-class ZarhostingTarget {
-  final String subjectId;
-  final String detailPath;
-  final String title;
-  final int year;
-  final bool isSeries;
-
-  ZarhostingTarget({
-    required this.subjectId,
-    required this.detailPath,
-    required this.title,
-    required this.year,
-    required this.isSeries,
-  });
-}
-
+/// Direct Zarhosting provider repository.
+///
+/// The provider is the playback source only: TMDB remains the catalogue and
+/// metadata source. Every call goes straight from the Flutter app to the
+/// provider; nothing is proxied through Supabase.
 class ZarhostingService {
+  final ZarhostingApiClient _client;
+
+  ZarhostingService({ZarhostingApiClient? client})
+      : _client = client ?? ZarhostingApiClient();
+
   static const List<String> _shortFilmSearches = [
     'animated short film',
     'short animation',
@@ -38,34 +26,291 @@ class ZarhostingService {
     'short film',
   ];
 
-  Future<http.Response> _getProvider(Uri uri,
-      {required Duration timeout}) async {
-    Object? lastError;
-    for (var attempt = 0; attempt < 3; attempt++) {
-      try {
-        final response = await http
-            .get(uri, headers: ApiConstants.zarhostingApiHeaders)
-            .timeout(timeout);
-        final transient = response.statusCode == 408 ||
-            response.statusCode == 429 ||
-            response.statusCode >= 500;
-        if (!transient || attempt == 2) return response;
-      } catch (error) {
-        lastError = error;
-        if (attempt == 2) {
-          throw const ProviderException(
-              'The streaming service could not be reached. Please try again.');
-        }
-      }
-      await Future<void>.delayed(Duration(milliseconds: 300 * (attempt + 1)));
+  static String normalizeTitle(String raw) => ProviderMatcher.normalize(raw);
+
+  static double calculateSimilarity(String s1, String s2) =>
+      ProviderMatcher.similarity(s1, s2);
+
+  static String comparisonTitle(String raw) =>
+      ProviderMatcher.comparisonTitle(raw);
+
+  /// Searches the provider and matches the TMDB title to a provider record.
+  ///
+  /// Provider match metadata is what gets cached by [StreamResolver]; signed
+  /// stream URLs never are.
+  Future<ProviderMatchResult> findMatch({
+    required String title,
+    String? originalTitle,
+    required int year,
+    required bool isSeries,
+  }) async {
+    final primary = title.trim();
+    final alternate = originalTitle?.trim() ?? '';
+    final queries = <String>[
+      if (primary.isNotEmpty) primary,
+      if (alternate.isNotEmpty &&
+          ProviderMatcher.normalize(alternate) !=
+              ProviderMatcher.normalize(primary))
+        alternate,
+    ];
+    if (queries.isEmpty) {
+      return ProviderMatchResult.none(
+        failure: const ProviderException(
+          ProviderErrorType.noProviderMatch,
+          'This title has no name to search the provider with.',
+        ),
+      );
     }
-    throw ProviderException(
-        'The streaming service could not be reached${lastError == null ? '.' : ': $lastError'}');
+
+    ProviderException? lastFailure;
+    ProviderException? matcherFailure;
+    for (final query in queries) {
+      try {
+        final decoded = await _client.getJson(
+          '/search',
+          query: {
+            'q': query,
+            'page': '1',
+            'per_page': '30',
+          },
+          kind: ProviderRequestKind.search,
+          timeout: const Duration(seconds: 12),
+        );
+        final items = ProviderPayload.itemsOf(decoded);
+        if (items.isEmpty) {
+          lastFailure = null;
+          continue;
+        }
+        final result = ProviderMatcher.select(
+          items: items,
+          title: primary.isNotEmpty ? primary : alternate,
+          originalTitle: alternate.isEmpty ? null : alternate,
+          year: year,
+          isSeries: isSeries,
+        );
+        if (result.isMatched || result.isAmbiguous) return result;
+        matcherFailure = result.failure ?? matcherFailure;
+        // A genuine no-match may still be worth retrying with the original
+        // title, so keep looking before giving up.
+      } on ProviderException catch (error) {
+        if (error.type == ProviderErrorType.noProviderMatch) continue;
+        // Transport and provider failures are terminal for this attempt: a
+        // second query would just repeat the same outage.
+        return ProviderMatchResult.none(failure: error);
+      }
+    }
+
+    return ProviderMatchResult.none(failure: lastFailure ?? matcherFailure);
   }
 
-  /// Searches the provider catalogue and keeps only playable movie records
-  /// whose metadata explicitly includes the Short genre. A query match alone
-  /// is deliberately never enough for the Clips feed.
+  /// Requests movie streams, or TV episode streams using the provider's exact
+  /// `se`/`ep` contract. Movies never send episode parameters.
+  Future<List<StreamSource>> resolveStreams({
+    required ProviderMatch match,
+    int season = 0,
+    int episode = 0,
+  }) async {
+    if (!match.hasDistinctIdentifiers) {
+      throw const ProviderException(
+        ProviderErrorType.missingProviderIdentifier,
+        'The provider match is missing its subject ID or detail path.',
+      );
+    }
+    if (match.isSeries && (season < 1 || episode < 1)) {
+      throw const ProviderException(
+        ProviderErrorType.missingProviderIdentifier,
+        'A TV episode needs both a season and an episode number.',
+      );
+    }
+
+    final query = <String, String>{'detail_path': match.detailPath};
+    if (match.isSeries) {
+      query['se'] = '$season';
+      query['ep'] = '$episode';
+    }
+
+    final decoded = await _client.getJson(
+      '/stream/${Uri.encodeComponent(match.subjectId)}',
+      query: query,
+      kind: ProviderRequestKind.stream,
+      timeout: const Duration(seconds: 18),
+    );
+    final body = ProviderPayload.bodyOf(decoded);
+
+    final bodyError = ProviderPayload.string(body, const ['error']);
+    if (bodyError.isNotEmpty) {
+      throw ProviderException(
+        bodyError == 'upstream_error'
+            ? ProviderErrorType.providerUnavailable
+            : ProviderErrorType.invalidProviderResponse,
+        'The provider could not return a stream for this title.',
+        diagnostic: bodyError,
+      );
+    }
+    if (ProviderPayload.optionalBool(
+          body,
+          const ['has_resource', 'hasResource'],
+        ) ==
+        false) {
+      throw const ProviderException(
+        ProviderErrorType.noPlayableSources,
+        'The provider has no playable resource for this title.',
+      );
+    }
+
+    final sources = <StreamSource>[];
+    final seenUrls = <String>{};
+    var previewOnly = false;
+    var rejected = 0;
+
+    void add(StreamSource source) {
+      if (source.isPreview) {
+        previewOnly = true;
+        return;
+      }
+      if (!source.isPlayableFormat) {
+        rejected++;
+        return;
+      }
+      if (seenUrls.add(source.url)) sources.add(source);
+    }
+
+    for (final raw in ProviderPayload.listOf(
+      body['sources'] ?? body['streams'],
+    )) {
+      if (raw is! Map) continue;
+      final item = Map<String, dynamic>.from(raw);
+      if (ProviderPayload.optionalBool(
+            item,
+            const ['vip_locked', 'vipLocked'],
+          ) ==
+          true) {
+        // The CDN rejects VIP-locked entries at playback time.
+        continue;
+      }
+      try {
+        add(StreamSource.fromProviderJson(item));
+      } on FormatException {
+        rejected++;
+      }
+    }
+
+    for (final raw in ProviderPayload.listOf(body['hls'])) {
+      try {
+        add(_adaptiveSource(raw, format: 'HLS'));
+      } on FormatException {
+        rejected++;
+      }
+    }
+
+    for (final raw in ProviderPayload.listOf(body['dash'])) {
+      try {
+        add(_adaptiveSource(raw, format: 'DASH'));
+      } on FormatException {
+        rejected++;
+      }
+    }
+
+    if (sources.isEmpty) {
+      throw ProviderException(
+        ProviderErrorType.noPlayableSources,
+        previewOnly
+            ? 'Only a trailer or preview is available for this title.'
+            : rejected > 0
+                ? 'The provider returned sources in an unsupported format.'
+                : 'The provider returned no playable source for this title.',
+        diagnostic: 'sources=0 previews=$previewOnly rejected=$rejected',
+      );
+    }
+
+    sources.sort(_compareSources);
+    return sources;
+  }
+
+  StreamSource _adaptiveSource(dynamic raw, {required String format}) {
+    final url = raw is Map
+        ? (raw['url'] ?? raw['stream_url'] ?? raw['file'] ?? '').toString()
+        : raw?.toString() ?? '';
+    final map = raw is Map
+        ? Map<String, dynamic>.from(raw)
+        : <String, dynamic>{'url': url};
+
+    final headers = <String, String>{};
+    final cookie = ProviderPayload.string(
+      map,
+      const ['signCookie', 'sign_cookie', 'cookie'],
+    );
+    if (cookie.isNotEmpty) headers['Cookie'] = cookie;
+
+    final resolved = StreamSource.fromProviderJson(
+      {
+        ...map,
+        'url': url,
+        'format': format,
+      },
+      extraHeaders: headers,
+    );
+    return resolved;
+  }
+
+  static int _compareSources(StreamSource a, StreamSource b) {
+    // Direct MP4 files first: they play and download most reliably.
+    final formatOrder = a.isMp4 ? 0 : (a.isHls ? 1 : 2);
+    final otherFormatOrder = b.isMp4 ? 0 : (b.isHls ? 1 : 2);
+    if (formatOrder != otherFormatOrder) {
+      return formatOrder.compareTo(otherFormatOrder);
+    }
+    final qualityOrder = b.qualityValue.compareTo(a.qualityValue);
+    if (qualityOrder != 0) return qualityOrder;
+    return a.format.compareTo(b.format);
+  }
+
+  /// Caption discovery is best-effort: a caption failure must never stop
+  /// video playback. Returns an empty list when the provider has none.
+  Future<List<CaptionTrack>> fetchCaptions({
+    required ProviderMatch match,
+    int season = 0,
+    int episode = 0,
+  }) async {
+    if (!match.hasDistinctIdentifiers) return const [];
+    if (match.isSeries && (season < 1 || episode < 1)) return const [];
+
+    final query = <String, String>{'detail_path': match.detailPath};
+    if (match.isSeries) {
+      query['se'] = '$season';
+      query['ep'] = '$episode';
+    }
+
+    try {
+      final decoded = await _client.getJson(
+        '/stream/${Uri.encodeComponent(match.subjectId)}/captions',
+        query: query,
+        kind: ProviderRequestKind.captions,
+        timeout: const Duration(seconds: 12),
+      );
+      final body = ProviderPayload.bodyOf(decoded);
+      final tracks = <CaptionTrack>[];
+      final seenLanguages = <String>{};
+      for (final raw in ProviderPayload.listOf(
+        body['captions'] ?? body['subtitles'],
+      )) {
+        if (raw is! Map) continue;
+        final track = CaptionTrack.fromJson(Map<String, dynamic>.from(raw));
+        if (!track.isSecure) continue;
+        if (!seenLanguages.add(track.language)) continue;
+        tracks.add(track);
+      }
+      return tracks;
+    } on ProviderException catch (error) {
+      if (error.type == ProviderErrorType.networkUnavailable) rethrow;
+      return const [];
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  /// Discovery rail for the Clips tab. Only provider records that explicitly
+  /// declare the Short genre, a movie type and an available resource qualify.
   Future<List<ProviderClip>> searchShortFilms() async {
     final firstPages = await Future.wait(
       _shortFilmSearches.map((query) => _searchCatalog(query, page: 1)),
@@ -110,328 +355,60 @@ class ZarhostingService {
     return clips.take(48).toList();
   }
 
-  Future<_ProviderSearchPage> _searchCatalog(String query,
-      {required int page}) async {
+  Future<_ProviderSearchPage> _searchCatalog(
+    String query, {
+    required int page,
+  }) async {
     try {
-      final uri = Uri.parse('${ApiConstants.zarhostingBaseUrl}/search').replace(
-        queryParameters: {
+      final decoded = await _client.getJson(
+        '/search',
+        query: {
           'q': query,
-          'page': page.toString(),
+          'page': '$page',
           'per_page': '30',
         },
+        kind: ProviderRequestKind.search,
+        timeout: const Duration(seconds: 14),
       );
-      final response =
-          await _getProvider(uri, timeout: const Duration(seconds: 14));
-      if (response.statusCode != 200) return const _ProviderSearchPage.empty();
-
-      final decoded = json.decode(response.body);
-      final root =
-          decoded is Map && decoded['data'] is Map ? decoded['data'] : decoded;
-      final rawItems = root is Map
-          ? (root['items'] ?? root['results'] ?? root['data'] ?? const [])
-          : root;
-      final items = rawItems is List
-          ? rawItems
-              .whereType<Map>()
-              .map((raw) =>
-                  ProviderClip.fromProviderJson(Map<String, dynamic>.from(raw)))
-              .whereType<ProviderClip>()
-              .toList()
-          : <ProviderClip>[];
-      final hasMore =
-          root is Map && (root['has_more'] == true || root['hasMore'] == true);
+      final items = ProviderPayload.itemsOf(decoded)
+          .whereType<Map>()
+          .map((raw) =>
+              ProviderClip.fromProviderJson(Map<String, dynamic>.from(raw)))
+          .whereType<ProviderClip>()
+          .toList();
+      final root = ProviderPayload.bodyOf(decoded);
+      final hasMore = root['has_more'] == true ||
+          root['hasMore'] == true ||
+          (root['total_pages'] is num && (root['total_pages'] as num) > page);
       return _ProviderSearchPage(items: items, hasMore: hasMore);
     } catch (_) {
       return const _ProviderSearchPage.empty();
     }
   }
 
-  static String normalizeTitle(String raw) {
-    return raw
-        .toLowerCase()
-        .replaceAll("'", "")
-        .replaceAll('"', '')
-        .replaceAll(RegExp(r'[\s\-_:,.!?\(\)\[\]]+'), ' ')
-        .replaceAll(RegExp(r'[^a-z0-9 ]'), '')
-        .trim();
-  }
-
-  /// Provider titles often carry a language badge or a season suffix
-  /// ("Breaking Bad [Hindi] S5"). Strip those before comparing so a season
-  /// entry still matches its TMDB series.
-  static String _comparisonTitle(String raw) {
-    var t = raw.replaceAll(RegExp(r'\[(?:[^\]]*)\]'), ' ');
-    t = t.replaceAll(RegExp(r'\((?:[^)]*)\)'), ' ');
-    t = t.replaceAll(
-        RegExp(r'\b(?:s\d{1,2}|season\s?\d{1,2})\b', caseSensitive: false),
-        ' ');
-    return normalizeTitle(t);
-  }
-
-  static double calculateSimilarity(String s1, String s2) {
-    final n1 = normalizeTitle(s1);
-    final n2 = normalizeTitle(s2);
-    if (n1 == n2) return 1.0;
-    if (n1.isEmpty || n2.isEmpty) return 0.0;
-    if (n1.contains(n2) || n2.contains(n1)) return 0.85;
-
-    final words1 = n1.split(' ').where((w) => w.length > 1).toSet();
-    final words2 = n2.split(' ').where((w) => w.length > 1).toSet();
-    if (words1.isEmpty || words2.isEmpty) return 0.0;
-
-    int matches = 0;
-    for (final w in words1) {
-      if (words2.contains(w)) matches++;
-    }
-    return (2.0 * matches) / (words1.length + words2.length);
-  }
-
-  Future<ZarhostingTarget?> findMatch({
+  /// Convenience used by the Clips player, which already has exact provider
+  /// identifiers rather than a TMDB title.
+  Future<ProviderMatch> requireMatch({
     required String title,
     required int year,
     required bool isSeries,
   }) async {
-    try {
-      final cleanTitle = title.trim();
-      if (cleanTitle.isEmpty) return null;
-
-      final url = Uri.parse(
-        '${ApiConstants.zarhostingBaseUrl}/search?q=${Uri.encodeComponent(cleanTitle)}&page=1&per_page=30',
-      );
-
-      final res = await _getProvider(url, timeout: const Duration(seconds: 15));
-      if (res.statusCode != 200) return null;
-
-      final data = json.decode(res.body);
-      final rawData =
-          (data is Map && data['data'] != null) ? data['data'] : data;
-      final rawList = rawData is Map
-          ? (rawData['items'] ?? rawData['results'] ?? [])
-          : (rawData is List ? rawData : []);
-
-      if (rawList is! List || rawList.isEmpty) return null;
-
-      ZarhostingTarget? bestCandidate;
-      double highestScore = 0.0;
-
-      for (final rawItem in rawList) {
-        if (rawItem is! Map) continue;
-        final item = rawItem.cast<String, dynamic>();
-
-        final itemTitle =
-            (item['title'] ?? item['name'] ?? item['subject_title'] ?? '')
-                .toString();
-        final subjectId =
-            (item['subject_id'] ?? item['subjectId'] ?? item['id'] ?? '')
-                .toString();
-        // The stream endpoint only answers when detail_path is the provider
-        // slug; passing the subject id there returns HTTP 502.
-        final detailPath =
-            (item['detail_path'] ?? item['detailPath'] ?? item['slug'] ?? '')
-                .toString()
-                .trim();
-
-        if (subjectId.isEmpty || detailPath.isEmpty || detailPath == subjectId)
-          continue;
-
-        final itemYearStr =
-            (item['year'] ?? item['release_year'] ?? item['release_date'] ?? '')
-                .toString();
-        final itemYear = int.tryParse(itemYearStr.length >= 4
-                ? itemYearStr.substring(0, 4)
-                : itemYearStr) ??
-            0;
-
-        final itemType = (item['type'] ?? item['subject_type'] ?? '')
-            .toString()
-            .toLowerCase();
-        final hasSeasons =
-            item['seasons'] is List && (item['seasons'] as List).isNotEmpty;
-        final itemIsSeries = itemType == 'tv' ||
-            itemType == 'series' ||
-            itemType == '2' ||
-            hasSeasons;
-
-        // Discard opposing media type
-        if (itemIsSeries != isSeries) {
-          continue;
-        }
-
-        final baseTitle =
-            (item['base_title'] ?? item['baseTitle'] ?? '').toString();
-        final sim = [
-          calculateSimilarity(title, itemTitle),
-          if (baseTitle.isNotEmpty) calculateSimilarity(title, baseTitle),
-          calculateSimilarity(
-              _comparisonTitle(title), _comparisonTitle(itemTitle)),
-        ].reduce((a, b) => a > b ? a : b);
-        if (sim < 0.55) continue;
-
-        double score = sim * 100.0;
-
-        // Year alignment weighting. Series season entries are dated by season
-        // release year, so they get a wider tolerance than movies.
-        if (year > 0 && itemYear > 0) {
-          final diff = (year - itemYear).abs();
-          if (diff == 0) {
-            score += 25.0;
-          } else if (diff <= 1) {
-            score += 15.0;
-          } else if (diff > (isSeries ? 8 : 2)) {
-            score -= 20.0;
-          }
-        }
-
-        if (score > highestScore) {
-          highestScore = score;
-          bestCandidate = ZarhostingTarget(
-            subjectId: subjectId,
-            detailPath: detailPath,
-            title: itemTitle,
-            year: itemYear,
-            isSeries: itemIsSeries,
+    final result = await findMatch(
+      title: title,
+      year: year,
+      isSeries: isSeries,
+    );
+    if (!result.isMatched) {
+      throw result.asFailure ??
+          const ProviderException(
+            ProviderErrorType.noProviderMatch,
+            'This title is not available on the provider.',
           );
-        }
-      }
-
-      // Rejection threshold for ambiguous/unrelated results
-      if (highestScore >= 60.0) {
-        return bestCandidate;
-      }
-    } catch (_) {}
-    return null;
-  }
-
-  Future<List<StreamSource>> resolveStreams({
-    required String subjectId,
-    required String detailPath,
-    int se = 0,
-    int ep = 0,
-  }) async {
-    try {
-      final endpoint =
-          '${ApiConstants.zarhostingBaseUrl}/stream/${Uri.encodeComponent(subjectId)}'
-          '?detail_path=${Uri.encodeComponent(detailPath)}&se=$se&ep=$ep';
-
-      final res = await _getProvider(Uri.parse(endpoint),
-          timeout: const Duration(seconds: 18));
-      if (res.statusCode != 200) {
-        throw ProviderException(
-            'The provider stream request failed (HTTP ${res.statusCode}).');
-      }
-
-      final data = json.decode(res.body);
-      final rawBody = data is Map && data['data'] != null ? data['data'] : data;
-      final body = rawBody is Map
-          ? Map<String, dynamic>.from(rawBody)
-          : <String, dynamic>{};
-      final rawSources =
-          body['sources'] ?? body['streams'] ?? const <dynamic>[];
-      final sourcesList = rawSources is List ? rawSources : const <dynamic>[];
-      final List<StreamSource> sources = [];
-      final Set<String> seenUrls = {};
-
-      for (final s in sourcesList) {
-        if (s is Map) {
-          final map = Map<String, dynamic>.from(s);
-          // vip_locked sources are rejected by the CDN at playback time.
-          if (map['vip_locked'] == true) continue;
-          final src = StreamSource.fromJson(map);
-          if (src.url.startsWith('https://') &&
-              !src.isPreview &&
-              !seenUrls.contains(src.url)) {
-            seenUrls.add(src.url);
-            sources.add(src);
-          }
-        }
-      }
-
-      // Append adaptive manifests (HLS first, then DASH) when the provider
-      // exposes them.
-      final rawHls =
-          body['hls'] is List ? body['hls'] as List : const <dynamic>[];
-      final rawDash =
-          body['dash'] is List ? body['dash'] as List : const <dynamic>[];
-      for (final entry in [
-        ...rawHls.map(
-            (h) => MapEntry(h is Map ? h['url'] ?? h['stream_url'] : h, 'HLS')),
-        ...rawDash.map((d) =>
-            MapEntry(d is Map ? d['url'] ?? d['stream_url'] : d, 'DASH')),
-      ]) {
-        final u = entry.key.toString();
-        if (u.startsWith('https://') && !seenUrls.contains(u)) {
-          seenUrls.add(u);
-          sources.add(StreamSource(
-            url: u,
-            resolution: 'Auto (${entry.value})',
-            qualityValue: 1080,
-            format: entry.value,
-            sizeBytes: 0,
-            durationSeconds: 0,
-            isPreview: false,
-          ));
-        }
-      }
-
-      // Sort: MP4 first, then descending quality
-      sources.sort((a, b) {
-        final fa = a.format.toUpperCase() == 'MP4' ? 0 : 1;
-        final fb = b.format.toUpperCase() == 'MP4' ? 0 : 1;
-        if (fa != fb) return fa.compareTo(fb);
-        return b.qualityValue.compareTo(a.qualityValue);
-      });
-
-      return sources;
-    } on ProviderException {
-      rethrow;
-    } catch (error) {
-      throw ProviderException(
-          'The provider returned an unreadable stream response: $error');
     }
+    return result.match!;
   }
 
-  Future<List<CaptionTrack>> fetchCaptions({
-    required String subjectId,
-    required String detailPath,
-    int se = 0,
-    int ep = 0,
-  }) async {
-    try {
-      final endpoint =
-          '${ApiConstants.zarhostingBaseUrl}/stream/${Uri.encodeComponent(subjectId)}/captions'
-          '?detail_path=${Uri.encodeComponent(detailPath)}&se=$se&ep=$ep';
-
-      final res = await _getProvider(Uri.parse(endpoint),
-          timeout: const Duration(seconds: 12));
-      if (res.statusCode != 200) return [];
-
-      final data = json.decode(res.body);
-      final rawBody = data is Map && data['data'] != null ? data['data'] : data;
-      final body = rawBody is Map
-          ? Map<String, dynamic>.from(rawBody)
-          : <String, dynamic>{};
-      final rawCaptions =
-          body['captions'] ?? body['subtitles'] ?? const <dynamic>[];
-      final captionsList =
-          rawCaptions is List ? rawCaptions : const <dynamic>[];
-
-      final List<CaptionTrack> tracks = [];
-      final Set<String> seen = {};
-
-      for (final c in captionsList) {
-        if (c is Map) {
-          final track = CaptionTrack.fromJson(Map<String, dynamic>.from(c));
-          if (track.url.startsWith('https://') && !seen.contains(track.url)) {
-            seen.add(track.url);
-            tracks.add(track);
-          }
-        }
-      }
-      return tracks;
-    } catch (_) {
-      return [];
-    }
-  }
+  String get baseUrl => ApiConstants.zarhostingBaseUrl;
 }
 
 class _ProviderSearchPage {

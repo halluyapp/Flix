@@ -1,0 +1,37 @@
+{
+  "subject_id": "1382465867459478920",
+  "se": 5,
+  "ep": 1,
+  "has_resource": true,
+  "sources": [
+    {
+      "resolution": "1080p",
+      "format": "MP4",
+      "url": "https://media.example.com/resource/episode-s5e1-1080.mp4?sign=fixture",
+      "size": "752719236",
+      "duration": 2578,
+      "codec": "h264",
+      "vip_locked": false
+    },
+    {
+      "resolution": "720p",
+      "format": "MP4",
+      "url": "https://media.example.com/mkv/episode-s5e1-720.mp4",
+      "size": "402289429",
+      "duration": 2578,
+      "codec": "h264",
+      "vip_locked": false
+    },
+    {
+      "resolution": "480p",
+      "format": "MP4",
+      "url": "https://media.example.com/resource/episode-s5e1-480.mp4",
+      "size": "201144714",
+      "duration": 2578,
+      "codec": "h264",
+      "vip_locked": false
+    }
+  ],
+  "hls": [],
+  "dash": []
+}

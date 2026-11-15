@@ -3,6 +3,7 @@ import 'package:http/http.dart' as http;
 import '../core/constants/api_constants.dart';
 import '../models/media_item.dart';
 import '../models/episode.dart';
+import '../models/tv_season.dart';
 
 class TmdbService {
   final http.Client? _client;
@@ -124,6 +125,18 @@ class TmdbService {
       }),
       isTv ? 'tv' : 'movie',
     );
+  }
+
+  /// Real season list from TMDB. Never hardcodes a season count.
+  Future<List<TvSeason>> getSeasons(int tvId) async {
+    final data = await _fetchTmdb('/tv/$tvId');
+    if (data is Map && data['seasons'] is List) {
+      return (data['seasons'] as List)
+          .whereType<Map>()
+          .map((entry) => TvSeason.fromJson(Map<String, dynamic>.from(entry)))
+          .toList(growable: false);
+    }
+    return const [];
   }
 
   Future<List<Episode>> getSeasonEpisodes(int tvId, int seasonNumber) async {

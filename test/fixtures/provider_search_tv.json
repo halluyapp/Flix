@@ -1,0 +1,40 @@
+{
+  "query": "Breaking Bad",
+  "page": 1,
+  "has_more": true,
+  "items": [
+    {
+      "name": "Breaking Bad [Hindi] S5",
+      "subject_id": "1382465867459478920",
+      "slug": "breaking-bad-hindi-mz0TdRUH7E1",
+      "type": "tv",
+      "base_title": "Breaking Bad  S5",
+      "year": "2012",
+      "audio": "Hindi",
+      "dub": true,
+      "has_resource": true
+    },
+    {
+      "name": "Breaking Bad [Hindi] S4",
+      "subject_id": "1382465867459478920",
+      "slug": "breaking-bad-hindi-mz0TdRUH7E1",
+      "type": "tv",
+      "base_title": "Breaking Bad  S4",
+      "year": "2011",
+      "audio": "Hindi",
+      "dub": true,
+      "has_resource": true
+    },
+    {
+      "name": "Breaking Bad",
+      "subject_id": "999000111",
+      "slug": "breaking-bad-original",
+      "type": "movie",
+      "base_title": "Breaking Bad",
+      "year": "2008",
+      "audio": "Original",
+      "dub": false,
+      "has_resource": true
+    }
+  ]
+}

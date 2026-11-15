@@ -3,25 +3,46 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:video_player/video_player.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:video_player/video_player.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
-import '../models/media_item.dart';
-import '../models/stream_source.dart';
+
+import '../core/constants/api_constants.dart';
+import '../core/provider/provider_failures.dart';
+import '../core/provider/provider_messages.dart';
 import '../models/caption_track.dart';
 import '../models/episode.dart';
+import '../models/media_item.dart';
 import '../models/offline_download.dart';
-import '../core/constants/api_constants.dart';
+import '../models/provider_match.dart';
+import '../models/stream_source.dart';
+import '../models/tv_season.dart';
+import '../services/diagnostics_service.dart';
+import '../services/episode_navigator.dart';
 import '../services/stream_resolver.dart';
-import '../services/zarhosting_service.dart';
-import '../services/tmdb_service.dart';
 import '../services/subtitle_service.dart';
-import '../widgets/player_media_options_sheet.dart';
+import '../services/tmdb_service.dart';
 import '../services/user_state_service.dart';
+import '../widgets/flix_loading.dart';
 
+enum _PlayerPhase {
+  resolvingMatch,
+  resolvingStream,
+  initializing,
+  ready,
+  ended,
+  failure,
+}
+
+/// Flix's player.
+///
+/// Playback is driven by a small, explicit state machine. Every asynchronous
+/// step carries a generation token so a newer source selection (or a closed
+/// player) can never be overwritten by an older initialisation.
 class PlayerScreen extends StatefulWidget {
   final MediaItem item;
-  final ZarhostingTarget? providerTarget;
+  final ProviderMatch? providerMatch;
   final int startSeason;
   final int startEpisode;
   final String? offlineFilePath;
@@ -30,7 +51,7 @@ class PlayerScreen extends StatefulWidget {
   const PlayerScreen({
     super.key,
     required this.item,
-    this.providerTarget,
+    this.providerMatch,
     this.startSeason = 1,
     this.startEpisode = 1,
     this.offlineFilePath,
@@ -41,666 +62,1462 @@ class PlayerScreen extends StatefulWidget {
   State<PlayerScreen> createState() => _PlayerScreenState();
 }
 
-class _PlayerScreenState extends State<PlayerScreen> {
+class _PlayerScreenState extends State<PlayerScreen>
+    with WidgetsBindingObserver {
+  static const Color _accent = Color(0xFFE50914);
+  static const Duration _autoHideDelay = Duration(seconds: 4);
+  static const String _autoplayKey = 'flix_player_autoplay_next';
+  static const String _subtitleLanguageKey = 'flix_player_subtitle_language';
+
   final StreamResolver _resolver = StreamResolver();
   final TmdbService _tmdb = TmdbService();
-
-  VideoPlayerController? _videoPlayerController;
-  Timer? _overlayHideTimer;
-  Timer? _progressSaveTimer;
   UserStateService? _userState;
 
-  bool _isResolving = true;
+  // Notifiers keep high-frequency video ticks away from the whole widget tree.
+  final ValueNotifier<Duration> _position = ValueNotifier(Duration.zero);
+  final ValueNotifier<Duration> _duration = ValueNotifier(Duration.zero);
+  final ValueNotifier<bool> _playing = ValueNotifier(false);
+  final ValueNotifier<bool> _buffering = ValueNotifier(false);
+  final ValueNotifier<String> _subtitleText = ValueNotifier('');
+
+  VideoPlayerController? _controller;
+  Timer? _controlsTimer;
+  Timer? _progressTimer;
+  Timer? _nextPromptTimer;
+  int _generation = 0;
+  bool _disposed = false;
+  int _profileIndex = 0;
+
+  _PlayerPhase _phase = _PlayerPhase.resolvingMatch;
+  ProviderException? _failure;
   String _statusMessage = 'Finding your title…';
-  List<StreamSource> _availableSources = [];
+  List<ProviderMatch> _candidates = const [];
+  ProviderMatch? _chosenMatch;
+
+  bool get _isOffline => widget.offlineFilePath != null;
+
+  List<StreamSource> _sources = const [];
   StreamSource? _selectedSource;
-  List<CaptionTrack> _availableCaptions = [];
+  List<CaptionTrack> _captions = const [];
   CaptionTrack? _selectedCaption;
   List<SubtitleCue> _subtitleCues = const [];
-  String _activeSubtitle = '';
   List<OfflineSubtitle> _offlineSubtitles = const [];
   OfflineSubtitle? _selectedOfflineSubtitle;
-  bool _recoveringPlayback = false;
-  int _playbackRecoveryAttempts = 0;
 
   int _currentSeason = 1;
   int _currentEpisode = 1;
-  List<Episode> _seasonEpisodes = [];
+  List<TvSeason> _seasons = const [];
+  final Map<int, List<Episode>> _episodeDetails = {};
+  final Map<int, List<int>> _episodeIndex = {};
+  bool _loadingEpisodes = false;
 
   bool _showControls = true;
-  bool _isPlaying = true;
-  bool _isBuffering = false;
-  Duration _position = Duration.zero;
-  Duration _duration = Duration.zero;
-
-  // Binge next episode countdown state
-  bool _showNextEpisodeCountdown = false;
-  int _nextEpisodeCountdownSeconds = 10;
-  Timer? _countdownTimer;
-
-  // Seeking ripple indicators
-  bool _showSeekLeftRipple = false;
-  bool _showSeekRightRipple = false;
+  bool _locked = false;
+  bool _recovering = false;
+  int _recoveryAttempts = 0;
+  double _speed = 1;
+  bool _autoplayNext = true;
+  String? _preferredSubtitleLanguage;
+  int _lastSavedSecond = -1;
+  double? _dragValue;
+  bool _showLeftRipple = false;
+  bool _showRightRipple = false;
+  bool _showNextPrompt = false;
+  int _nextCountdown = 8;
+  bool _advancing = false;
 
   @override
   void initState() {
     super.initState();
-    _currentSeason = widget.startSeason;
-    _currentEpisode = widget.startEpisode;
-
+    WidgetsBinding.instance.addObserver(this);
+    _currentSeason = widget.startSeason > 0 ? widget.startSeason : 1;
+    _currentEpisode = widget.startEpisode > 0 ? widget.startEpisode : 1;
     _offlineSubtitles = widget.offlineSubtitles;
     unawaited(_enterPlayerMode());
-
-    if (widget.item.mediaType == 'tv' && widget.offlineFilePath == null) {
-      _loadEpisodesIfSeries();
-    }
-    if (widget.offlineFilePath != null) {
-      _initializeOffline();
+    unawaited(_loadPreferences());
+    if (_isOffline) {
+      unawaited(_openOffline());
     } else {
-      _resolveAndPlay();
-    }
-  }
-
-  Future<void> _enterPlayerMode() async {
-    try {
-      await WakelockPlus.enable();
-      await SystemChrome.setPreferredOrientations([
-        DeviceOrientation.landscapeRight,
-        DeviceOrientation.landscapeLeft,
-      ]);
-      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-    } catch (error) {
-      debugPrint('Flix player mode could not be applied: $error');
+      if (widget.item.mediaType == 'tv') {
+        unawaited(_loadEpisodeIndex());
+      }
+      unawaited(_startPlayback());
     }
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    // Resolved once and cached: the provider must not be looked up from
-    // dispose()/timers where the element tree is already deactivated.
     _userState = Provider.of<UserStateService>(context, listen: false);
   }
 
-  Future<void> _loadEpisodesIfSeries() async {
-    if (widget.item.mediaType == 'tv') {
-      final eps = await _tmdb.getSeasonEpisodes(widget.item.id, _currentSeason);
-      if (mounted) {
-        setState(() {
-          _seasonEpisodes = eps;
-        });
-      }
-    }
+  bool _isCurrent(int generation) =>
+      mounted && !_disposed && generation == _generation;
+
+  void _safeSetState(VoidCallback fn) {
+    if (!mounted || _disposed) return;
+    setState(fn);
   }
 
-  ZarhostingTarget? get _effectiveProviderTarget {
-    if (widget.providerTarget != null) return widget.providerTarget;
-    final subjectId = widget.item.providerSubjectId;
-    final detailPath = widget.item.providerDetailPath;
-    if (subjectId == null || detailPath == null) return null;
-    return ZarhostingTarget(
-      subjectId: subjectId,
-      detailPath: detailPath,
-      title: widget.item.title,
-      year: widget.item.releaseYear,
-      isSeries: widget.item.mediaType == 'tv',
-    );
-  }
-
-  Future<void> _resolveAndPlay({bool forceRefresh = false}) async {
-    if (!mounted) return;
-    setState(() {
-      _isResolving = true;
-      _statusMessage = 'Finding the best version…';
-      _showNextEpisodeCountdown = false;
-    });
-
-    ResolvedMediaStream? resolved;
+  Future<void> _enterPlayerMode() async {
     try {
-      resolved = await _resolver.resolve(
-        item: widget.item,
-        providerTarget: _effectiveProviderTarget,
-        season: widget.item.mediaType == 'tv' ? _currentSeason : 0,
-        episode: widget.item.mediaType == 'tv' ? _currentEpisode : 0,
-        forceRefresh: forceRefresh,
-      );
+      await WakelockPlus.enable();
+      await SystemChrome.setPreferredOrientations(const [
+        DeviceOrientation.landscapeRight,
+        DeviceOrientation.landscapeLeft,
+      ]);
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     } catch (error) {
-      resolved = null;
-      debugPrint('Flix stream resolution failed: $error');
-      if (mounted && error is ProviderException) _statusMessage = error.message;
+      DiagnosticsService.instance.record(
+        scope: 'player',
+        operation: 'enter_player_mode',
+        error: error,
+      );
+    }
+  }
+
+  Future<void> _leavePlayerMode() async {
+    try {
+      await WakelockPlus.disable();
+      await SystemChrome.setPreferredOrientations(const [
+        DeviceOrientation.portraitUp,
+      ]);
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    } catch (error) {
+      DiagnosticsService.instance.record(
+        scope: 'player',
+        operation: 'leave_player_mode',
+        error: error,
+      );
+    }
+  }
+
+  Future<void> _loadPreferences() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      _autoplayNext = prefs.getBool(_autoplayKey) ?? true;
+      _preferredSubtitleLanguage = prefs.getString(_subtitleLanguageKey);
+      if (mounted) setState(() {});
+    } catch (_) {
+      // Defaults are safe when preferences are unavailable.
+    }
+  }
+
+  Future<void> _persistAutoplay() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_autoplayKey, _autoplayNext);
+    } catch (_) {}
+  }
+
+  Future<void> _persistSubtitleLanguage(String? language) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (language == null) {
+        await prefs.remove(_subtitleLanguageKey);
+      } else {
+        await prefs.setString(_subtitleLanguageKey, language);
+      }
+    } catch (_) {}
+  }
+
+  // ---------------------------------------------------------------- playback
+
+  Future<void> _startPlayback({
+    bool forceRefresh = false,
+    Duration? startAt,
+  }) async {
+    if (_isOffline) return;
+    final generation = ++_generation;
+    _safeSetState(() {
+      _phase = _chosenMatch == null &&
+              widget.providerMatch == null &&
+              ProviderMatch.fromMediaItem(widget.item) == null
+          ? _PlayerPhase.resolvingMatch
+          : _PlayerPhase.resolvingStream;
+      _statusMessage = _phase == _PlayerPhase.resolvingMatch
+          ? 'Finding your title…'
+          : 'Finding the best stream…';
+      _failure = null;
+      _candidates = const [];
+      _showNextPrompt = false;
+    });
+    _nextPromptTimer?.cancel();
+
+    final resolution = await _resolver.resolve(
+      item: widget.item,
+      providerMatch: widget.providerMatch ?? _chosenMatch,
+      season: _currentSeason,
+      episode: _currentEpisode,
+      forceRefresh: forceRefresh,
+      onStage: (stage) {
+        if (!_isCurrent(generation)) return;
+        _safeSetState(() {
+          _phase = stage == ResolutionStage.matchingProvider
+              ? _PlayerPhase.resolvingMatch
+              : _PlayerPhase.resolvingStream;
+          _statusMessage = stage == ResolutionStage.matchingProvider
+              ? 'Finding your title…'
+              : 'Finding the best stream…';
+        });
+      },
+    );
+
+    if (!_isCurrent(generation)) return;
+
+    if (!resolution.isSuccess) {
+      _safeSetState(() {
+        _phase = _PlayerPhase.failure;
+        _failure = resolution.failure;
+        _candidates = resolution.candidates;
+      });
+      DiagnosticsService.instance.record(
+        scope: 'player',
+        operation: 'resolve',
+        failureType: resolution.errorType,
+        data: {
+          'mediaType': widget.item.mediaType,
+          'season': _currentSeason,
+          'episode': _currentEpisode,
+        },
+      );
+      return;
     }
 
-    if (!mounted) return;
+    final stream = resolution.stream!;
+    _applyResolution(stream, generation);
+    if (!_isCurrent(generation)) return;
 
-    if (resolved == null || resolved.selectableSources.isEmpty) {
-      setState(() {
-        _isResolving = false;
-        _statusMessage =
-            'This title is temporarily unavailable. Please try again.';
+    final first = _selectedSource;
+    if (first == null) {
+      _safeSetState(() {
+        _phase = _PlayerPhase.failure;
+        _failure = const ProviderException(
+          ProviderErrorType.noPlayableSources,
+          'The provider returned no playable source for this title.',
+        );
       });
       return;
     }
 
-    _availableSources = resolved.selectableSources;
-    final previousResolution = _selectedSource?.resolution;
-    _selectedSource = resolved.selectableSources.firstWhere(
-      (source) => source.resolution == previousResolution,
-      orElse: () => resolved!.selectableSources.first,
+    var started = await _initializeController(
+      first,
+      generation,
+      startAt: startAt,
     );
-    _availableCaptions = resolved.captions;
-    _selectedCaption = _availableCaptions.isEmpty
-        ? null
-        : _availableCaptions.firstWhere((c) => c.isDefault,
-            orElse: () => _availableCaptions.first);
-    unawaited(_selectOnlineCaption(_selectedCaption));
+    if (!_isCurrent(generation)) return;
 
-    final started = await _initializePlayer(_selectedSource!.url);
-    if (!started && !forceRefresh && mounted) {
-      _playbackRecoveryAttempts++;
-      if (_playbackRecoveryAttempts <= 1) {
-        await _resolveAndPlay(forceRefresh: true);
+    if (!started) {
+      // Try one alternate source before surfacing a fatal state.
+      final alternative = _sources.firstWhere(
+        (source) => source.url != first.url,
+        orElse: () => first,
+      );
+      if (alternative.url != first.url) {
+        _safeSetState(() => _selectedSource = alternative);
+        started = await _initializeController(
+          alternative,
+          generation,
+          startAt: startAt,
+        );
+      }
+    }
+
+    if (!_isCurrent(generation)) return;
+
+    if (!started) {
+      _resolver.invalidate(
+        item: widget.item,
+        season: _currentSeason,
+        episode: _currentEpisode,
+      );
+      if (!forceRefresh) {
+        await _startPlayback(
+          forceRefresh: true,
+          startAt: startAt ?? _position.value,
+        );
         return;
       }
+      _safeSetState(() {
+        _phase = _PlayerPhase.failure;
+        _failure = const ProviderException(
+          ProviderErrorType.unknown,
+          'Playback could not start with the built-in player.',
+          diagnostic: 'exoplayer initialization failed',
+        );
+      });
     }
   }
 
-  Future<bool> _initializePlayer(String streamUrl, {Duration? startAt}) async {
-    setState(() {
-      _isResolving = true;
-      _statusMessage = 'Getting your title ready…';
+  void _applyResolution(ResolvedMediaStream stream, int generation) {
+    final previousQuality = _selectedSource?.qualityValue;
+    final sources = stream.selectableSources;
+    if (sources.isEmpty) return;
+    final selected = sources.firstWhere(
+      (source) => source.qualityValue == previousQuality,
+      orElse: () => sources.first,
+    );
+    _safeSetState(() {
+      _sources = sources;
+      _selectedSource = selected;
+      _captions = stream.captions;
+      _selectedCaption = _pickCaption(stream.captions);
+      _subtitleCues = const [];
+      _subtitleText.value = '';
+    });
+    final caption = _selectedCaption;
+    if (caption != null) {
+      unawaited(_loadOnlineSubtitle(caption, generation));
+    }
+  }
+
+  CaptionTrack? _pickCaption(List<CaptionTrack> captions) {
+    if (captions.isEmpty) return null;
+    final preferred = _preferredSubtitleLanguage;
+    if (preferred != null) {
+      for (final caption in captions) {
+        if (caption.language == preferred) return caption;
+      }
+    }
+    for (final caption in captions) {
+      if (caption.isDefault) return caption;
+    }
+    return captions.first;
+  }
+
+  Future<bool> _initializeController(
+    StreamSource source,
+    int generation, {
+    Duration? startAt,
+  }) async {
+    _safeSetState(() {
+      _phase = _PlayerPhase.initializing;
+      _statusMessage = 'Preparing playback…';
     });
 
-    final previousController = _videoPlayerController;
-    _videoPlayerController = null;
-    await previousController?.dispose();
-
-    VideoPlayerController? controller;
-    final profiles = widget.offlineFilePath == null
-        ? ApiConstants.zarhostingMediaHeaderProfiles
-        : const <Map<String, String>>[<String, String>{}];
-    for (final profile in profiles) {
+    final previous = _controller;
+    _controller = null;
+    if (previous != null) {
+      previous.removeListener(_onVideoTick);
       try {
-        final attemptController = widget.offlineFilePath != null
-            ? VideoPlayerController.file(File(widget.offlineFilePath!))
-            : VideoPlayerController.networkUrl(Uri.parse(streamUrl),
-                httpHeaders: profile);
-        controller = attemptController;
-        _videoPlayerController = attemptController;
-        await attemptController.initialize();
-        if (attemptController.value.isInitialized) break;
-        await attemptController.dispose();
-        controller = null;
-        _videoPlayerController = null;
-      } catch (error) {
-        debugPrint('Flix player initialization attempt failed: $error');
-        await controller?.dispose();
-        controller = null;
-        _videoPlayerController = null;
-      }
+        await previous.dispose();
+      } catch (_) {}
     }
+    _buffering.value = false;
+    _playing.value = false;
 
-    final activeController = controller;
-    if (activeController == null || !activeController.value.isInitialized) {
-      if (mounted) {
-        setState(() {
-          _isResolving = false;
-          _isPlaying = false;
-          _statusMessage =
-              'Playback could not start. Check your connection and try again.';
+    if (!_isCurrent(generation)) return false;
+
+    if (_isOffline) {
+      final path = widget.offlineFilePath;
+      if (path == null) return false;
+      final file = File(path);
+      if (!await file.exists()) {
+        _safeSetState(() {
+          _phase = _PlayerPhase.failure;
+          _failure = const ProviderException(
+            ProviderErrorType.unknown,
+            'This offline copy is missing. Remove it from Downloads and '
+            'download it again.',
+          );
         });
+        return false;
       }
-      return false;
+      try {
+        final controller = VideoPlayerController.file(file);
+        await controller.initialize();
+        if (!_isCurrent(generation)) {
+          await controller.dispose();
+          return false;
+        }
+        _controller = controller;
+        controller.addListener(_onVideoTick);
+        _duration.value = controller.value.duration;
+        if (startAt != null && startAt > Duration.zero) {
+          await controller.seekTo(startAt);
+        }
+        await controller.play();
+        _playing.value = true;
+        _safeSetState(() {
+          _phase = _PlayerPhase.ready;
+          _showControls = true;
+        });
+        _startProgressTimer();
+        _armControlsTimer();
+        return true;
+      } catch (error) {
+        DiagnosticsService.instance.record(
+          scope: 'player',
+          operation: 'open_offline_file',
+          error: error,
+        );
+        return false;
+      }
     }
 
-    if (!mounted) {
-      await activeController.dispose();
+    final profiles = ApiConstants.zarhostingMediaHeaderProfiles
+        .map((profile) => <String, String>{...profile, ...source.headers})
+        .toList(growable: false);
+    final startIndex = _profileIndex.clamp(0, profiles.length - 1).toInt();
+
+    for (var attempt = 0; attempt < profiles.length; attempt++) {
+      final index = (startIndex + attempt) % profiles.length;
+      if (!_isCurrent(generation)) return false;
+      VideoPlayerController? controller;
+      try {
+        controller = VideoPlayerController.networkUrl(
+          Uri.parse(source.url),
+          httpHeaders: profiles[index],
+        );
+        await controller.initialize();
+        if (!_isCurrent(generation)) {
+          await controller.dispose();
+          return false;
+        }
+        if (!controller.value.isInitialized) {
+          throw StateError('Player did not initialise');
+        }
+
+        _controller = controller;
+        _profileIndex = index;
+        controller.addListener(_onVideoTick);
+        await controller.setLooping(false);
+        await controller.setPlaybackSpeed(_speed);
+
+        final resumeAt = startAt ?? _resumePosition();
+        if (resumeAt > Duration.zero) {
+          await controller.seekTo(resumeAt);
+        }
+        await controller.play();
+
+        _duration.value = controller.value.duration;
+        _playing.value = true;
+        _safeSetState(() {
+          _phase = _PlayerPhase.ready;
+          _showControls = true;
+        });
+        _startProgressTimer();
+        _armControlsTimer();
+        return true;
+      } catch (error) {
+        DiagnosticsService.instance.record(
+          scope: 'player',
+          operation: 'initialize_profile_$index',
+          error: error,
+          data: {'format': source.format, 'quality': source.resolution},
+        );
+        try {
+          await controller?.dispose();
+        } catch (_) {}
+        _controller = null;
+        if (!_shouldTryNextProfile(error, attempt, profiles.length)) break;
+      }
+    }
+    return false;
+  }
+
+  /// Header profiles are only cycled when the failure plausibly involves a
+  /// header/origin rejection. Permanent failures (missing file, bad URL) stop
+  /// immediately instead of retrying every profile.
+  bool _shouldTryNextProfile(Object error, int attempt, int total) {
+    if (total <= 1) return false;
+    final text = error.toString().toLowerCase();
+    if (text.contains('404') ||
+        text.contains('410') ||
+        text.contains('not found')) {
       return false;
     }
+    final headerRelated = const [
+      '401',
+      '403',
+      '426',
+      '428',
+      '429',
+      'forbidden',
+      'unauthorized',
+      'denied',
+    ].any(text.contains);
+    if (headerRelated) return true;
+    // One alternate profile for an unclassified failure, never an endless loop.
+    return attempt == 0;
+  }
 
-    activeController.addListener(_videoListener);
-
-    // Resume where this profile left off (unless the episode was finished).
+  Duration _resumePosition() {
     final saved = _userState?.progressFor(
       widget.item,
       season: _currentSeason,
       episode: _currentEpisode,
     );
-    final resumePosition = startAt ??
-        (saved != null && !saved.isCompleted && saved.positionSeconds > 5
-            ? Duration(seconds: saved.positionSeconds)
-            : Duration.zero);
-    if (resumePosition > const Duration(seconds: 1)) {
-      await activeController.seekTo(resumePosition);
+    if (saved != null && !saved.isCompleted && saved.positionSeconds > 5) {
+      return Duration(seconds: saved.positionSeconds);
     }
-
-    try {
-      await activeController.play();
-    } catch (error) {
-      debugPrint('Flix could not start playback: $error');
-      await activeController.dispose();
-      if (mounted) setState(() => _videoPlayerController = null);
-      return false;
-    }
-
-    _startProgressPeriodicSave();
-    _resetOverlayTimer();
-
-    if (mounted) {
-      setState(() {
-        _isResolving = false;
-        _isPlaying = true;
-        _duration = activeController.value.duration;
-      });
-    }
-    return true;
+    return Duration.zero;
   }
 
-  Future<void> _initializeOffline() async {
-    if (widget.offlineFilePath == null) return;
-    final file = File(widget.offlineFilePath!);
-    if (!await file.exists()) {
-      if (mounted) {
-        setState(() {
-          _isResolving = false;
-          _statusMessage =
-              'This offline copy is missing. Remove it from Downloads and try again.';
-        });
-      }
+  // ------------------------------------------------------------- video ticks
+
+  void _onVideoTick() {
+    final controller = _controller;
+    if (controller == null || _disposed) return;
+    final value = controller.value;
+    if (!value.isInitialized) return;
+
+    _position.value = value.position;
+    if (value.duration > Duration.zero) _duration.value = value.duration;
+    if (_playing.value != value.isPlaying) _playing.value = value.isPlaying;
+    _buffering.value = value.isBuffering;
+
+    final cue = SubtitleService.activeText(_subtitleCues, value.position);
+    if (cue != _subtitleText.value) _subtitleText.value = cue;
+
+    if (value.hasError) {
+      unawaited(_recoverFromPlaybackError());
       return;
     }
-    setState(() {
-      _isResolving = true;
-      _statusMessage = 'Opening your offline copy…';
+
+    final seconds = value.position.inSeconds;
+    if (seconds > 0 && (seconds - _lastSavedSecond).abs() >= 10) {
+      _lastSavedSecond = seconds;
+      _saveProgress(value.position.inSeconds, value.duration.inSeconds);
+    }
+
+    _maybeOfferNextEpisode(value);
+    _maybeMarkEnded(value);
+  }
+
+  void _maybeMarkEnded(VideoPlayerValue value) {
+    if (_phase != _PlayerPhase.ready || !value.isCompleted) return;
+    _saveProgress(value.duration.inSeconds, value.duration.inSeconds);
+    _safeSetState(() => _phase = _PlayerPhase.ended);
+    _maybeOfferNextEpisode(value, force: true);
+  }
+
+  void _maybeOfferNextEpisode(VideoPlayerValue value, {bool force = false}) {
+    if (widget.item.mediaType != 'tv' || _isOffline || _showNextPrompt) return;
+    if (value.duration.inSeconds < 60) return;
+    final remaining = value.duration.inSeconds - value.position.inSeconds;
+    final fraction = value.position.inSeconds / value.duration.inSeconds;
+    if (!force && remaining > 40 && fraction < 0.95) return;
+    if (_nextEpisode == null) return;
+    _openNextPrompt();
+  }
+
+  void _openNextPrompt() {
+    if (_showNextPrompt || _isOffline) return;
+    _nextPromptTimer?.cancel();
+    _safeSetState(() {
+      _showNextPrompt = true;
+      _nextCountdown = 8;
     });
-    if (_offlineSubtitles.isNotEmpty) {
-      unawaited(_selectOfflineSubtitle(_offlineSubtitles.first));
-    }
-    final started = await _initializePlayer('', startAt: Duration.zero);
-    if (!started && mounted) {
-      setState(() {
-        _isResolving = false;
-        _statusMessage = 'This offline copy could not be opened.';
-      });
-    }
-  }
-
-  Future<void> _recoverPlayback() async {
-    if (widget.offlineFilePath != null) return;
-    if (_recoveringPlayback) return;
-    if (_playbackRecoveryAttempts >= 3) {
-      final failedController = _videoPlayerController;
-      _videoPlayerController = null;
-      await failedController?.dispose();
-      if (mounted) {
-        setState(() {
-          _isResolving = false;
-          _isPlaying = false;
-          _statusMessage = 'Playback was interrupted. Tap Retry to reconnect.';
-        });
-      }
-      return;
-    }
-    _recoveringPlayback = true;
-    _playbackRecoveryAttempts++;
-    final resumeAt = _videoPlayerController?.value.position ?? _position;
-    final resolution = _selectedSource?.resolution;
-    if (mounted) {
-      setState(() {
-        _isResolving = true;
-        _statusMessage = 'Reconnecting…';
-      });
-    }
-    try {
-      final fresh = await _resolver.resolve(
-        item: widget.item,
-        providerTarget: _effectiveProviderTarget,
-        season: widget.item.mediaType == 'tv' ? _currentSeason : 0,
-        episode: widget.item.mediaType == 'tv' ? _currentEpisode : 0,
-        forceRefresh: true,
-      );
-      if (!mounted || fresh == null || fresh.selectableSources.isEmpty)
-        throw StateError('No fresh stream was returned');
-      _availableSources = fresh.selectableSources;
-      _selectedSource = fresh.selectableSources.firstWhere(
-        (source) => source.resolution == resolution,
-        orElse: () => fresh.selectableSources.first,
-      );
-      _availableCaptions = fresh.captions;
-      final started =
-          await _initializePlayer(_selectedSource!.url, startAt: resumeAt);
-      if (!started && mounted) throw StateError('Playback could not restart');
-      _playbackRecoveryAttempts = 0;
-    } catch (error) {
-      debugPrint('Flix playback recovery failed: $error');
-      if (mounted) {
-        setState(() {
-          _isResolving = false;
-          _isPlaying = false;
-          _statusMessage = 'Playback was interrupted. Tap Retry to reconnect.';
-        });
-      }
-    } finally {
-      _recoveringPlayback = false;
-    }
-  }
-
-  Future<void> _selectOnlineCaption(CaptionTrack? track) async {
-    setState(() {
-      _selectedCaption = track;
-      _subtitleCues = const [];
-      _activeSubtitle = '';
-    });
-    if (track == null) return;
-    try {
-      final cues = await SubtitleService.fetch(track);
-      if (!mounted || _selectedCaption?.id != track.id) return;
-      setState(() => _subtitleCues = cues);
-    } catch (error) {
-      debugPrint('Flix subtitle load failed: $error');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text('This subtitle track could not be loaded.')),
-        );
-      }
-    }
-  }
-
-  Future<void> _selectQuality(StreamSource source) async {
-    _playbackRecoveryAttempts = 0;
-    setState(() => _selectedSource = source);
-    final started = await _initializePlayer(source.url, startAt: _position);
-    if (!started && mounted) await _resolveAndPlay(forceRefresh: true);
-  }
-
-  Future<void> _selectOfflineSubtitle(OfflineSubtitle? subtitle) async {
-    setState(() {
-      _selectedOfflineSubtitle = subtitle;
-      _subtitleCues = const [];
-      _activeSubtitle = '';
-    });
-    if (subtitle == null) return;
-    try {
-      final text = await File(subtitle.path).readAsString();
-      final cues = SubtitleService.parse(text);
-      if (mounted) setState(() => _subtitleCues = cues);
-    } catch (error) {
-      debugPrint('Flix offline subtitle load failed: $error');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text('This saved subtitle file could not be opened.')),
-        );
-      }
-    }
-  }
-
-  void _videoListener() {
-    final controller = _videoPlayerController;
-    if (controller == null || !controller.value.isInitialized) return;
-
-    final val = controller.value;
-    if (val.hasError) {
-      unawaited(_recoverPlayback());
-      return;
-    }
-    final pos = val.position;
-    final dur = val.duration;
-    final activeSubtitle = SubtitleService.activeText(_subtitleCues, pos);
-
-    if (mounted) {
-      setState(() {
-        _position = pos;
-        _duration = dur;
-        _isPlaying = val.isPlaying;
-        _isBuffering = val.isBuffering;
-        _activeSubtitle = activeSubtitle;
-      });
-    }
-
-    // Trigger Binge Countdown at 95% completion or last 45s on series episodes
-    if (widget.item.mediaType == 'tv' &&
-        widget.offlineFilePath == null &&
-        dur.inSeconds > 60 &&
-        !_showNextEpisodeCountdown) {
-      final frac = dur.inSeconds > 0 ? pos.inSeconds / dur.inSeconds : 0.0;
-      final remaining = dur.inSeconds - pos.inSeconds;
-      if (frac >= 0.95 || remaining <= 45) {
-        _startNextEpisodeCountdown();
-      }
-    }
-  }
-
-  void _startNextEpisodeCountdown() {
-    if (_showNextEpisodeCountdown) return;
-    setState(() {
-      _showNextEpisodeCountdown = true;
-      _nextEpisodeCountdownSeconds = 10;
-    });
-
-    _countdownTimer?.cancel();
-    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (!mounted) return;
-      if (_nextEpisodeCountdownSeconds <= 1) {
+    if (!_autoplayNext) return;
+    _nextPromptTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted || _disposed) {
         timer.cancel();
-        _playNextEpisode();
+        return;
+      }
+      if (_nextCountdown <= 1) {
+        timer.cancel();
+        unawaited(_playNextEpisode());
       } else {
-        setState(() {
-          _nextEpisodeCountdownSeconds--;
-        });
+        _safeSetState(() => _nextCountdown--);
       }
     });
   }
 
-  void _playNextEpisode() {
-    _countdownTimer?.cancel();
-    _saveProgressNow();
-
-    final nextEp = _currentEpisode + 1;
-    setState(() {
-      _currentEpisode = nextEp;
-      _showNextEpisodeCountdown = false;
-    });
-
-    _resolveAndPlay();
+  void _dismissNextPrompt() {
+    _nextPromptTimer?.cancel();
+    _safeSetState(() => _showNextPrompt = false);
   }
 
-  void _startProgressPeriodicSave() {
-    _progressSaveTimer?.cancel();
-    _progressSaveTimer = Timer.periodic(const Duration(seconds: 10), (_) {
-      _saveProgressNow();
+  // -------------------------------------------------------------- progress
+
+  void _startProgressTimer() {
+    _progressTimer?.cancel();
+    _progressTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      final controller = _controller;
+      if (controller == null || !controller.value.isInitialized) return;
+      _saveProgress(
+        controller.value.position.inSeconds,
+        controller.value.duration.inSeconds,
+      );
     });
   }
 
-  void _saveProgressNow() {
-    final controller = _videoPlayerController;
-    if (controller == null || !controller.value.isInitialized) return;
-    final pos = controller.value.position.inSeconds;
-    final dur = controller.value.duration.inSeconds;
-    if (pos <= 0) return;
+  void _saveProgress(int positionSeconds, int durationSeconds) {
+    if (_disposed) return;
+    if (positionSeconds <= 0 || durationSeconds <= 0) return;
     _userState?.updateProgress(
       item: widget.item,
-      season: _currentSeason,
-      episode: _currentEpisode,
-      positionSeconds: pos,
-      durationSeconds: dur,
+      season: widget.item.mediaType == 'tv' ? _currentSeason : 1,
+      episode: widget.item.mediaType == 'tv' ? _currentEpisode : 1,
+      episodeTitle: _episodeNameFor(_currentSeason, _currentEpisode),
+      positionSeconds: positionSeconds,
+      durationSeconds: durationSeconds,
     );
   }
 
-  void _resetOverlayTimer() {
-    _overlayHideTimer?.cancel();
-    _overlayHideTimer = Timer(const Duration(seconds: 4), () {
-      if (mounted && _isPlaying) {
-        setState(() {
-          _showControls = false;
-        });
+  void _saveProgressNow() {
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) return;
+    _saveProgress(
+      controller.value.position.inSeconds,
+      controller.value.duration.inSeconds,
+    );
+  }
+
+  // --------------------------------------------------------------- recovery
+
+  Future<void> _recoverFromPlaybackError() async {
+    if (_isOffline || _recovering) return;
+    if (_recoveryAttempts >= 2) {
+      final failed = _controller;
+      _controller = null;
+      failed?.removeListener(_onVideoTick);
+      await failed?.dispose();
+      _safeSetState(() {
+        _phase = _PlayerPhase.failure;
+        _isPlayingReset();
+        _failure = const ProviderException(
+          ProviderErrorType.streamExpired,
+          'The stream stopped and could not be restored automatically.',
+        );
+      });
+      return;
+    }
+    _recovering = true;
+    _recoveryAttempts++;
+    final resumeAt = _controller?.value.position ?? _position.value;
+    _resolver.invalidate(
+      item: widget.item,
+      season: _currentSeason,
+      episode: _currentEpisode,
+    );
+    _safeSetState(() {
+      _phase = _PlayerPhase.resolvingStream;
+      _statusMessage = 'Refreshing the stream…';
+    });
+    try {
+      await _startPlayback(forceRefresh: true, startAt: resumeAt);
+    } finally {
+      _recovering = false;
+    }
+  }
+
+  void _isPlayingReset() {
+    _playing.value = false;
+    _buffering.value = false;
+  }
+
+  // ---------------------------------------------------------------- offline
+
+  Future<void> _openOffline() async {
+    final path = widget.offlineFilePath;
+    if (path == null) return;
+    final generation = ++_generation;
+    _safeSetState(() {
+      _phase = _PlayerPhase.initializing;
+      _statusMessage = 'Opening your offline copy…';
+    });
+    final file = File(path);
+    if (!await file.exists()) {
+      _safeSetState(() {
+        _phase = _PlayerPhase.failure;
+        _failure = const ProviderException(
+          ProviderErrorType.unknown,
+          'This offline copy is no longer on this device. Remove it from '
+          'Downloads and download it again.',
+        );
+      });
+      return;
+    }
+    if (_offlineSubtitles.isNotEmpty) {
+      await _loadOfflineSubtitle(_offlineSubtitles.first);
+    }
+    if (!_isCurrent(generation)) return;
+    final started = await _initializeController(
+      StreamSource(
+        url: 'file://$path',
+        resolution: 'Offline',
+        qualityValue: 0,
+        format: 'MP4',
+        sizeBytes: await file.length(),
+        durationSeconds: 0,
+        isPreview: false,
+      ),
+      generation,
+      startAt: Duration.zero,
+    );
+    if (!started && _isCurrent(generation)) {
+      _safeSetState(() {
+        _phase = _PlayerPhase.failure;
+        _failure = const ProviderException(
+          ProviderErrorType.unknown,
+          'This offline file could not be opened by the player. Re-download it '
+          'from Downloads.',
+        );
+      });
+    }
+  }
+
+  // -------------------------------------------------------------- subtitles
+
+  Future<void> _loadOnlineSubtitle(CaptionTrack track, int generation) async {
+    try {
+      final cues = await SubtitleService.fetch(track);
+      if (!_isCurrent(generation) || _selectedCaption?.id != track.id) return;
+      _subtitleCues = cues;
+      _subtitleText.value = SubtitleService.activeText(
+        cues,
+        _position.value,
+      );
+    } catch (error) {
+      DiagnosticsService.instance.record(
+        scope: 'player',
+        operation: 'load_online_subtitle',
+        error: error,
+      );
+      if (_isCurrent(generation)) {
+        _showMessage('This subtitle track could not be loaded.');
+      }
+    }
+  }
+
+  Future<void> _loadOfflineSubtitle(OfflineSubtitle subtitle) async {
+    try {
+      if (!await File(subtitle.path).exists()) {
+        _showMessage('This saved subtitle file is missing.');
+        return;
+      }
+      final text = await File(subtitle.path).readAsString();
+      final cues = SubtitleService.parse(text);
+      if (!mounted || _disposed) return;
+      setState(() {
+        _selectedOfflineSubtitle = subtitle;
+        _selectedCaption = null;
+        _subtitleCues = cues;
+      });
+      _subtitleText.value = SubtitleService.activeText(cues, _position.value);
+    } catch (error) {
+      DiagnosticsService.instance.record(
+        scope: 'player',
+        operation: 'load_offline_subtitle',
+        error: error,
+      );
+      _showMessage('This saved subtitle file could not be opened.');
+    }
+  }
+
+  Future<void> _selectOnlineSubtitle(CaptionTrack? track) async {
+    setState(() {
+      _selectedCaption = track;
+      _subtitleCues = const [];
+      _subtitleText.value = '';
+    });
+    if (track == null) {
+      await _persistSubtitleLanguage(null);
+      return;
+    }
+    _preferredSubtitleLanguage = track.language;
+    await _persistSubtitleLanguage(track.language);
+    await _loadOnlineSubtitle(track, _generation);
+  }
+
+  Future<void> _selectOfflineSubtitle(OfflineSubtitle? subtitle) async {
+    if (subtitle == null) {
+      setState(() {
+        _selectedOfflineSubtitle = null;
+        _subtitleCues = const [];
+      });
+      _subtitleText.value = '';
+      return;
+    }
+    await _loadOfflineSubtitle(subtitle);
+  }
+
+  // ---------------------------------------------------------------- sources
+
+  Future<void> _selectSource(StreamSource source) async {
+    if (source.url == _selectedSource?.url) return;
+    final resumeAt = _controller?.value.position ?? _position.value;
+    _recoveryAttempts = 0;
+    final generation = _generation;
+    setState(() => _selectedSource = source);
+    final started = await _initializeController(
+      source,
+      generation,
+      startAt: resumeAt,
+    );
+    if (!started && _isCurrent(generation)) {
+      _safeSetState(() {
+        _phase = _PlayerPhase.failure;
+        _failure = const ProviderException(
+          ProviderErrorType.unsupportedStreamFormat,
+          'This version could not be played. Choose another source.',
+        );
+      });
+    }
+  }
+
+  // --------------------------------------------------------------- episodes
+
+  Future<void> _loadEpisodeIndex() async {
+    if (widget.item.mediaType != 'tv' || _isOffline) return;
+    try {
+      final seasons = await _tmdb.getSeasons(widget.item.id);
+      if (!mounted || _disposed) return;
+      if (seasons.isNotEmpty) {
+        setState(() => _seasons = seasons);
+      }
+    } catch (error) {
+      DiagnosticsService.instance.record(
+        scope: 'player',
+        operation: 'load_seasons',
+        error: error,
+      );
+    }
+    await _ensureSeasonEpisodes(_currentSeason);
+  }
+
+  Future<void> _ensureSeasonEpisodes(int season) async {
+    if (_episodeIndex.containsKey(season)) return;
+    try {
+      final episodes = await _tmdb.getSeasonEpisodes(widget.item.id, season);
+      if (!mounted || _disposed) return;
+      setState(() {
+        _episodeDetails[season] = episodes;
+        _episodeIndex[season] = episodes
+            .map((episode) => episode.episodeNumber)
+            .toList(growable: false);
+      });
+    } catch (error) {
+      DiagnosticsService.instance.record(
+        scope: 'player',
+        operation: 'load_episodes',
+        error: error,
+        data: {'season': season},
+      );
+    }
+  }
+
+  List<Episode> get _seasonEpisodes =>
+      _episodeDetails[_currentSeason] ?? const <Episode>[];
+
+  String _episodeNameFor(int season, int episode) {
+    for (final entry in _episodeDetails[season] ?? const <Episode>[]) {
+      if (entry.episodeNumber == episode) return entry.name;
+    }
+    return '';
+  }
+
+  EpisodePointer? get _nextEpisode => EpisodeNavigator.next(
+        currentSeason: _currentSeason,
+        currentEpisode: _currentEpisode,
+        episodesBySeason: _episodeIndex,
+        seasonOrder: _seasons
+            .map((season) => season.seasonNumber)
+            .toList(growable: false),
+      );
+
+  Future<void> _playNextEpisode() async {
+    if (_advancing) return;
+    final next = _nextEpisode;
+    if (next == null) {
+      _showMessage('This is the last available episode.');
+      _dismissNextPrompt();
+      return;
+    }
+    _advancing = true;
+    try {
+      if (!_episodeIndex.containsKey(next.season)) {
+        _loadingEpisodes = true;
+        await _ensureSeasonEpisodes(next.season);
+        _loadingEpisodes = false;
+      }
+      if (!mounted || _disposed) return;
+      _saveProgressNow();
+      _dismissNextPrompt();
+      setState(() {
+        _currentSeason = next.season;
+        _currentEpisode = next.episode;
+        _selectedCaption = null;
+        _selectedOfflineSubtitle = null;
+        _subtitleCues = const [];
+        _subtitleText.value = '';
+        _recoveryAttempts = 0;
+      });
+      await _startPlayback();
+    } finally {
+      _advancing = false;
+    }
+  }
+
+  Future<void> _playEpisode(int season, int episode) async {
+    if (season == _currentSeason && episode == _currentEpisode) return;
+    _saveProgressNow();
+    _dismissNextPrompt();
+    if (!_episodeIndex.containsKey(season)) await _ensureSeasonEpisodes(season);
+    if (!mounted || _disposed) return;
+    setState(() {
+      _currentSeason = season;
+      _currentEpisode = episode;
+      _selectedCaption = null;
+      _subtitleCues = const [];
+      _subtitleText.value = '';
+      _recoveryAttempts = 0;
+    });
+    await _startPlayback();
+  }
+
+  // --------------------------------------------------------------- controls
+
+  void _toggleControls() {
+    if (_locked) return;
+    _safeSetState(() {
+      _showControls = !_showControls;
+      if (_showControls) {
+        _armControlsTimer();
+      } else {
+        _controlsTimer?.cancel();
+      }
+    });
+  }
+
+  void _armControlsTimer() {
+    _controlsTimer?.cancel();
+    if (_locked) return;
+    _controlsTimer = Timer(_autoHideDelay, () {
+      if (!mounted || _disposed) return;
+      if (_playing.value && !_locked) {
+        _safeSetState(() => _showControls = false);
       }
     });
   }
 
   void _togglePlayPause() {
-    final controller = _videoPlayerController;
-    if (controller == null) return;
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) return;
     if (controller.value.isPlaying) {
       controller.pause();
+      _saveProgressNow();
     } else {
       controller.play();
-      _resetOverlayTimer();
     }
-    setState(() {});
+    _armControlsTimer();
+  }
+
+  void _seekTo(Duration target) {
+    final controller = _controller;
+    if (controller == null || !controller.value.isInitialized) return;
+    final clampMax = _duration.value;
+    final clamped = target < Duration.zero
+        ? Duration.zero
+        : (clampMax > Duration.zero && target > clampMax ? clampMax : target);
+    controller.seekTo(clamped);
+    _position.value = clamped;
+    _saveProgress(clamped.inSeconds, _duration.value.inSeconds);
+    _armControlsTimer();
   }
 
   void _seekBy(int seconds) {
-    if (_videoPlayerController == null) return;
-    final target = _position + Duration(seconds: seconds);
-    final clamped = Duration(
-      seconds: target.inSeconds.clamp(0, _duration.inSeconds),
-    );
-    _videoPlayerController!.seekTo(clamped);
-
+    if (_controller == null) return;
+    _seekTo(_position.value + Duration(seconds: seconds));
     if (seconds > 0) {
-      setState(() => _showSeekRightRipple = true);
-      Future.delayed(const Duration(milliseconds: 600), () {
-        if (mounted) setState(() => _showSeekRightRipple = false);
+      _safeSetState(() => _showRightRipple = true);
+      Future<void>.delayed(const Duration(milliseconds: 550), () {
+        if (mounted && !_disposed) _safeSetState(() => _showRightRipple = false);
       });
     } else {
-      setState(() => _showSeekLeftRipple = true);
-      Future.delayed(const Duration(milliseconds: 600), () {
-        if (mounted) setState(() => _showSeekLeftRipple = false);
+      _safeSetState(() => _showLeftRipple = true);
+      Future<void>.delayed(const Duration(milliseconds: 550), () {
+        if (mounted && !_disposed) _safeSetState(() => _showLeftRipple = false);
       });
     }
-    _resetOverlayTimer();
   }
 
-  void _openAudioSubtitlesModal() {
-    showModalBottomSheet(
+  void _toggleLock() {
+    _safeSetState(() {
+      _locked = !_locked;
+      _showControls = !_locked;
+    });
+    if (_locked) {
+      _controlsTimer?.cancel();
+    } else {
+      _armControlsTimer();
+    }
+  }
+
+  Future<void> _setSpeed(double speed) async {
+    _speed = speed;
+    try {
+      await _controller?.setPlaybackSpeed(speed);
+    } catch (_) {}
+    _safeSetState(() {});
+  }
+
+  void _showMessage(String message) {
+    if (!mounted || _disposed) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor: const Color(0xFF262626),
+        ),
+      );
+  }
+
+  // ----------------------------------------------------------------- sheets
+
+  Future<void> _openSourcesSheet() async {
+    if (_sources.isEmpty) {
+      _showMessage(
+        _isOffline
+            ? 'This copy is playing from local storage.'
+            : 'No alternate versions are available.',
+      );
+      return;
+    }
+    await showModalBottomSheet<void>(
       context: context,
-      isScrollControlled: true,
       backgroundColor: const Color(0xFF141414),
+      isScrollControlled: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
-      builder: (_) => PlayerMediaOptionsSheet(
-        isOffline: widget.offlineFilePath != null,
-        sources: _availableSources,
-        selectedSource: _selectedSource,
-        captions: _availableCaptions,
-        selectedCaption: _selectedCaption,
-        offlineSubtitles: _offlineSubtitles,
-        selectedOfflineSubtitle: _selectedOfflineSubtitle,
-        onSubtitleOff: () {
-          if (widget.offlineFilePath != null) {
-            _selectOfflineSubtitle(null);
-          } else {
-            _selectOnlineCaption(null);
-          }
-        },
-        onQualitySelected: (source) => unawaited(_selectQuality(source)),
-        onCaptionSelected: (caption) => _selectOnlineCaption(caption),
-        onOfflineCaptionSelected: (subtitle) =>
-            _selectOfflineSubtitle(subtitle),
-      ),
+      builder: (sheetContext) {
+        return SafeArea(
+          top: false,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.of(context).size.height * 0.7,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _sheetHeader(sheetContext, 'Video quality'),
+                Flexible(
+                  child: ListView(
+                    shrinkWrap: true,
+                    children: [
+                      for (final source in _sources)
+                        ListTile(
+                          title: Text(
+                            source.displayLabel,
+                            style: const TextStyle(color: Colors.white),
+                          ),
+                          subtitle: Text(
+                            [
+                              source.sizeLabel,
+                              if (source.codec.isNotEmpty) source.codec,
+                              if (source.isAdaptive)
+                                'Streaming only · cannot be saved offline',
+                            ].join(' · '),
+                            style: const TextStyle(
+                              color: Colors.white54,
+                              fontSize: 12,
+                            ),
+                          ),
+                          trailing: source.url == _selectedSource?.url
+                              ? const Icon(Icons.check, color: _accent)
+                              : null,
+                          onTap: () {
+                            Navigator.pop(sheetContext);
+                            unawaited(_selectSource(source));
+                          },
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 
-  void _openEpisodesDrawer() {
-    if (widget.offlineFilePath != null) return;
-    showModalBottomSheet(
+  Future<void> _openSubtitleSheet() async {
+    await showModalBottomSheet<void>(
       context: context,
       backgroundColor: const Color(0xFF141414),
       isScrollControlled: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
-      builder: (ctx) {
-        return Container(
-          height: MediaQuery.of(context).size.height * 0.85,
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Text(
-                    'Episodes • Season $_currentSeason',
-                    style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.close, color: Colors.white),
-                    onPressed: () => Navigator.pop(ctx),
-                  ),
-                ],
-              ),
-              const Divider(color: Colors.white24),
-              Expanded(
-                child: _seasonEpisodes.isEmpty
-                    ? const Center(
-                        child: Text(
-                          'No episode data available.',
-                          style: TextStyle(color: Colors.white54),
+      builder: (sheetContext) {
+        final offline = _isOffline;
+        final subtitlesOff = offline
+            ? _selectedOfflineSubtitle == null
+            : _selectedCaption == null;
+        final tracks = offline ? _offlineSubtitles : _captions;
+        return SafeArea(
+          top: false,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.of(context).size.height * 0.7,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _sheetHeader(sheetContext, 'Subtitles'),
+                Flexible(
+                  child: ListView(
+                    shrinkWrap: true,
+                    children: [
+                      ListTile(
+                        title: const Text(
+                          'Off',
+                          style: TextStyle(color: Colors.white),
                         ),
-                      )
-                    : ListView.separated(
-                        itemCount: _seasonEpisodes.length,
-                        separatorBuilder: (_, __) =>
-                            const Divider(color: Colors.white12),
-                        itemBuilder: (context, idx) {
-                          final ep = _seasonEpisodes[idx];
-                          final isCurrent = ep.episodeNumber == _currentEpisode;
-                          return ListTile(
-                            contentPadding: EdgeInsets.zero,
-                            leading: Stack(
-                              alignment: Alignment.center,
-                              children: [
-                                ClipRRect(
-                                  borderRadius: BorderRadius.circular(4),
-                                  child: Image.network(
-                                    ep.thumbnail,
-                                    width: 80,
-                                    height: 50,
-                                    fit: BoxFit.cover,
-                                    errorBuilder: (_, __, ___) => Container(
-                                        width: 80,
-                                        height: 50,
-                                        color: Colors.grey[900]),
-                                  ),
-                                ),
-                                if (isCurrent)
-                                  const Icon(Icons.play_circle_fill,
-                                      color: Color(0xFFE50914), size: 24),
-                              ],
-                            ),
-                            title: Text(
-                              '${ep.episodeNumber}. ${ep.name}',
-                              style: TextStyle(
-                                color: isCurrent
-                                    ? const Color(0xFFE50914)
-                                    : Colors.white,
-                                fontWeight: isCurrent
-                                    ? FontWeight.bold
-                                    : FontWeight.w500,
-                                fontSize: 14,
-                              ),
-                            ),
-                            subtitle: Text(
-                              '${ep.runtime}m',
-                              style: const TextStyle(
-                                  color: Colors.white54, fontSize: 12),
-                            ),
-                            onTap: () {
-                              Navigator.pop(ctx);
-                              setState(() {
-                                _currentEpisode = ep.episodeNumber;
-                              });
-                              _resolveAndPlay();
-                            },
-                          );
+                        trailing: subtitlesOff
+                            ? const Icon(Icons.check, color: _accent)
+                            : null,
+                        onTap: () {
+                          Navigator.pop(sheetContext);
+                          if (offline) {
+                            unawaited(_selectOfflineSubtitle(null));
+                          } else {
+                            unawaited(_selectOnlineSubtitle(null));
+                          }
                         },
                       ),
+                      if (tracks.isEmpty)
+                        const ListTile(
+                          title: Text(
+                            'No subtitles are available from the provider.',
+                            style: TextStyle(
+                              color: Colors.white54,
+                              fontSize: 13,
+                            ),
+                          ),
+                        ),
+                      if (offline)
+                        for (final subtitle in _offlineSubtitles)
+                          ListTile(
+                            title: Text(
+                              subtitle.languageName,
+                              style: const TextStyle(color: Colors.white),
+                            ),
+                            subtitle: const Text(
+                              'Saved on this device',
+                              style: TextStyle(
+                                color: Colors.white38,
+                                fontSize: 12,
+                              ),
+                            ),
+                            trailing: _selectedOfflineSubtitle?.path ==
+                                    subtitle.path
+                                ? const Icon(Icons.check, color: _accent)
+                                : null,
+                            onTap: () {
+                              Navigator.pop(sheetContext);
+                              unawaited(_selectOfflineSubtitle(subtitle));
+                            },
+                          )
+                      else
+                        for (final caption in _captions)
+                          ListTile(
+                            title: Text(
+                              caption.languageName,
+                              style: const TextStyle(color: Colors.white),
+                            ),
+                            trailing: _selectedCaption?.id == caption.id
+                                ? const Icon(Icons.check, color: _accent)
+                                : null,
+                            onTap: () {
+                              Navigator.pop(sheetContext);
+                              unawaited(_selectOnlineSubtitle(caption));
+                            },
+                          ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _openSpeedSheet() async {
+    const speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF141414),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (sheetContext) {
+        return SafeArea(
+          top: false,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _sheetHeader(sheetContext, 'Playback speed'),
+              for (final speed in speeds)
+                ListTile(
+                  title: Text(
+                    speed == 1 ? 'Normal (1x)' : '${speed}x',
+                    style: const TextStyle(color: Colors.white),
+                  ),
+                  trailing: _speed == speed
+                      ? const Icon(Icons.check, color: _accent)
+                      : null,
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    unawaited(_setSpeed(speed));
+                  },
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _openEpisodesSheet() async {
+    if (_isOffline || widget.item.mediaType != 'tv') return;
+    await _ensureSeasonEpisodes(_currentSeason);
+    if (!mounted || _disposed) return;
+    final seasonOptions = _seasons.isNotEmpty
+        ? _seasons
+            .where((season) => season.hasEpisodes)
+            .toList(growable: false)
+        : _episodeIndex.keys
+            .map((number) => TvSeason(
+                  seasonNumber: number,
+                  name: 'Season $number',
+                  episodeCount: _episodeIndex[number]?.length ?? 0,
+                ))
+            .toList(growable: false);
+    if (seasonOptions.isEmpty) {
+      _showMessage('No episode list is available for this show.');
+      return;
+    }
+    var seasonValue = _currentSeason;
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF141414),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (modalContext, setModalState) {
+            final episodes = _episodeDetails[seasonValue] ??
+                (seasonValue == _currentSeason
+                    ? _seasonEpisodes
+                    : const <Episode>[]);
+            return SafeArea(
+              top: false,
+              child: SizedBox(
+                height: MediaQuery.of(context).size.height * 0.78,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _sheetHeader(modalContext, 'Episodes'),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: DropdownButton<int>(
+                        value: seasonValue,
+                        dropdownColor: const Color(0xFF1F1F1F),
+                        underline: const SizedBox.shrink(),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                        ),
+                        items: [
+                          for (final season in seasonOptions)
+                            DropdownMenuItem(
+                              value: season.seasonNumber,
+                              child: Text(season.label),
+                            ),
+                        ],
+                        onChanged: (value) async {
+                          if (value == null) return;
+                          await _ensureSeasonEpisodes(value);
+                          if (!mounted || _disposed) return;
+                          setModalState(() => seasonValue = value);
+                        },
+                      ),
+                    ),
+                    const Divider(color: Colors.white12),
+                    Expanded(
+                      child: _loadingEpisodes && episodes.isEmpty
+                          ? const Center(
+                              child: FlixOrbitDots(size: 34),
+                            )
+                          : episodes.isEmpty
+                              ? const Center(
+                                  child: Text(
+                                    'No episode data for this season.',
+                                    style: TextStyle(color: Colors.white54),
+                                  ),
+                                )
+                              : ListView.separated(
+                                  itemCount: episodes.length,
+                                  separatorBuilder: (_, __) =>
+                                      const Divider(color: Colors.white12),
+                                  itemBuilder: (context, index) {
+                                    final episode = episodes[index];
+                                    final isCurrent =
+                                        episode.seasonNumber ==
+                                                _currentSeason &&
+                                            episode.episodeNumber ==
+                                                _currentEpisode;
+                                    return ListTile(
+                                      leading: SizedBox(
+                                        width: 78,
+                                        height: 46,
+                                        child: ClipRRect(
+                                          borderRadius:
+                                              BorderRadius.circular(4),
+                                          child: Image.network(
+                                            episode.thumbnail,
+                                            fit: BoxFit.cover,
+                                            errorBuilder: (_, __, ___) =>
+                                                Container(
+                                              color: Colors.white10,
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                      title: Text(
+                                        '${episode.episodeNumber}. ${episode.name}',
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          color: isCurrent
+                                              ? _accent
+                                              : Colors.white,
+                                          fontSize: 14,
+                                          fontWeight: isCurrent
+                                              ? FontWeight.w700
+                                              : FontWeight.w500,
+                                        ),
+                                      ),
+                                      subtitle: Text(
+                                        '${episode.runtime}m',
+                                        style: const TextStyle(
+                                          color: Colors.white54,
+                                          fontSize: 11,
+                                        ),
+                                      ),
+                                      trailing: isCurrent
+                                          ? const Icon(
+                                              Icons.play_circle_fill,
+                                              color: _accent,
+                                            )
+                                          : null,
+                                      onTap: () {
+                                        Navigator.pop(modalContext);
+                                        unawaited(
+                                          _playEpisode(
+                                            episode.seasonNumber,
+                                            episode.episodeNumber,
+                                          ),
+                                        );
+                                      },
+                                    );
+                                  },
+                                ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Future<void> _openMenu() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF141414),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (sheetContext) {
+        return SafeArea(
+          top: false,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _sheetHeader(sheetContext, 'Playback'),
+              ListTile(
+                leading: const Icon(Icons.speed, color: Colors.white70),
+                title: const Text(
+                  'Playback speed',
+                  style: TextStyle(color: Colors.white),
+                ),
+                subtitle: Text(
+                  '${_speed}x',
+                  style: const TextStyle(color: Colors.white54),
+                ),
+                onTap: () {
+                  Navigator.pop(sheetContext);
+                  unawaited(_openSpeedSheet());
+                },
+              ),
+              if (!_isOffline)
+                ListTile(
+                  leading: const Icon(Icons.high_quality, color: Colors.white70),
+                  title: const Text(
+                    'Video quality',
+                    style: TextStyle(color: Colors.white),
+                  ),
+                  subtitle: Text(
+                    _selectedSource?.displayLabel ?? 'Auto',
+                    style: const TextStyle(color: Colors.white54),
+                  ),
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    unawaited(_openSourcesSheet());
+                  },
+                ),
+              if (widget.item.mediaType == 'tv' && !_isOffline)
+                ListTile(
+                  leading: const Icon(Icons.video_library_outlined,
+                      color: Colors.white70),
+                  title: const Text(
+                    'Episodes',
+                    style: TextStyle(color: Colors.white),
+                  ),
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    unawaited(_openEpisodesSheet());
+                  },
+                ),
+              SwitchListTile(
+                secondary: const Icon(Icons.skip_next, color: Colors.white70),
+                title: const Text(
+                  'Autoplay next episode',
+                  style: TextStyle(color: Colors.white),
+                ),
+                value: _autoplayNext,
+                activeColor: _accent,
+                onChanged: (value) {
+                  setState(() => _autoplayNext = value);
+                  unawaited(_persistAutoplay());
+                  if (!value) _nextPromptTimer?.cancel();
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.lock_outline, color: Colors.white70),
+                title: const Text(
+                  'Lock controls',
+                  style: TextStyle(color: Colors.white),
+                ),
+                onTap: () {
+                  Navigator.pop(sheetContext);
+                  _toggleLock();
+                },
               ),
             ],
           ),
@@ -709,396 +1526,832 @@ class _PlayerScreenState extends State<PlayerScreen> {
     );
   }
 
-  String _formatDuration(Duration d) {
-    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
-    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
-    if (d.inHours > 0) {
-      return '${d.inHours}:$m:$s';
-    }
-    return '$m:$s';
-  }
-
-  @override
-  void dispose() {
-    _saveProgressNow();
-    _overlayHideTimer?.cancel();
-    _progressSaveTimer?.cancel();
-    _countdownTimer?.cancel();
-    _videoPlayerController?.removeListener(_videoListener);
-    _videoPlayerController?.dispose();
-
-    unawaited(_leavePlayerMode());
-    super.dispose();
-  }
-
-  Future<void> _leavePlayerMode() async {
-    try {
-      await WakelockPlus.disable();
-      await SystemChrome.setPreferredOrientations(
-          [DeviceOrientation.portraitUp]);
-      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-    } catch (error) {
-      debugPrint('Flix player mode could not be restored: $error');
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      body: Stack(
+  Widget _sheetHeader(BuildContext sheetContext, String title) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 10, 6, 6),
+      child: Row(
         children: [
-          // 1. Video Surface & Double-tap gesture detectors
-          if (_videoPlayerController != null &&
-              _videoPlayerController!.value.isInitialized)
-            GestureDetector(
-              onTap: () {
-                setState(() {
-                  _showControls = !_showControls;
-                });
-                if (_showControls) _resetOverlayTimer();
-              },
-              child: Center(
-                child: AspectRatio(
-                  aspectRatio: _videoPlayerController!.value.aspectRatio,
-                  child: VideoPlayer(_videoPlayerController!),
-                ),
-              ),
-            )
-          else
-            Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (_isResolving)
-                    const CircularProgressIndicator(color: Color(0xFFE50914))
-                  else
-                    const Icon(Icons.videocam_off_outlined,
-                        color: Colors.white54, size: 48),
-                  const SizedBox(height: 16),
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 32),
-                    child: Text(
-                      _statusMessage,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(color: Colors.white, fontSize: 13),
-                    ),
-                  ),
-                  if (!_isResolving) ...[
-                    const SizedBox(height: 16),
-                    ElevatedButton.icon(
-                      onPressed: () {
-                        _playbackRecoveryAttempts = 0;
-                        _resolveAndPlay(forceRefresh: true);
-                      },
-                      icon: const Icon(Icons.refresh, size: 18),
-                      label: const Text('Retry'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFFE50914),
-                        foregroundColor: Colors.white,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    TextButton(
-                      onPressed: () => Navigator.of(context).pop(),
-                      child: const Text('Back',
-                          style: TextStyle(color: Colors.white70)),
-                    ),
-                  ],
-                ],
+          Expanded(
+            child: Text(
+              title,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 16,
+                fontWeight: FontWeight.w700,
               ),
             ),
-
-          if (_activeSubtitle.isNotEmpty && !_isResolving)
-            Positioned(
-              left: 28,
-              right: 28,
-              bottom: _showControls ? 104 : 34,
-              child: IgnorePointer(
-                child: Center(
-                  child: Container(
-                    constraints: const BoxConstraints(maxWidth: 720),
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-                    decoration: BoxDecoration(
-                        color: Colors.black.withValues(alpha: 0.78),
-                        borderRadius: BorderRadius.circular(4)),
-                    child: Text(
-                      _activeSubtitle,
-                      textAlign: TextAlign.center,
-                      style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 18,
-                          height: 1.25,
-                          fontWeight: FontWeight.w600),
-                    ),
-                  ),
-                ),
-              ),
-            ),
-
-          // 2. Gesture Seek Detectors (Left 40% = seek -10s, Right 40% = seek +10s)
-          Row(
-            children: [
-              Expanded(
-                flex: 4,
-                child: GestureDetector(
-                  behavior: HitTestBehavior.translucent,
-                  onDoubleTap: () => _seekBy(-10),
-                  child: Container(),
-                ),
-              ),
-              Expanded(flex: 2, child: Container()),
-              Expanded(
-                flex: 4,
-                child: GestureDetector(
-                  behavior: HitTestBehavior.translucent,
-                  onDoubleTap: () => _seekBy(10),
-                  child: Container(),
-                ),
-              ),
-            ],
           ),
-
-          // 3. Double-tap Seek Ripples
-          if (_showSeekLeftRipple)
-            Positioned(
-              left: 60,
-              top: MediaQuery.of(context).size.height / 2 - 30,
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                decoration: BoxDecoration(
-                    color: Colors.black54,
-                    borderRadius: BorderRadius.circular(20)),
-                child: const Row(
-                  children: [
-                    Icon(Icons.replay_10, color: Colors.white, size: 28),
-                    SizedBox(width: 6),
-                    Text('10s',
-                        style: TextStyle(
-                            color: Colors.white, fontWeight: FontWeight.bold)),
-                  ],
-                ),
-              ),
-            ),
-          if (_showSeekRightRipple)
-            Positioned(
-              right: 60,
-              top: MediaQuery.of(context).size.height / 2 - 30,
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                decoration: BoxDecoration(
-                    color: Colors.black54,
-                    borderRadius: BorderRadius.circular(20)),
-                child: const Row(
-                  children: [
-                    Text('10s',
-                        style: TextStyle(
-                            color: Colors.white, fontWeight: FontWeight.bold)),
-                    SizedBox(width: 6),
-                    Icon(Icons.forward_10, color: Colors.white, size: 28),
-                  ],
-                ),
-              ),
-            ),
-
-          // 4. Buffering Spinner
-          if (_isBuffering && !_isResolving)
-            const Center(
-              child: CircularProgressIndicator(color: Color(0xFFE50914)),
-            ),
-
-          // 5. Cinema Player HUD Overlay
-          if (_showControls && !_isResolving)
-            Container(
-              decoration: const BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [
-                    Colors.black87,
-                    Colors.transparent,
-                    Colors.transparent,
-                    Colors.black87
-                  ],
-                  begin: Alignment.topCenter,
-                  end: Alignment.bottomCenter,
-                ),
-              ),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  // Top Bar
-                  Padding(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 24, vertical: 16),
-                    child: Row(
-                      children: [
-                        IconButton(
-                          icon: const Icon(Icons.arrow_back,
-                              color: Colors.white, size: 28),
-                          onPressed: () => Navigator.of(context).pop(),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Text(
-                            widget.item.mediaType == 'tv'
-                                ? '${widget.item.title}  •  S$_currentSeason:E$_currentEpisode'
-                                : widget.item.title,
-                            style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 16,
-                                fontWeight: FontWeight.bold),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.subtitles_outlined,
-                              color: Colors.white, size: 26),
-                          onPressed: _openAudioSubtitlesModal,
-                        ),
-                        if (widget.item.mediaType == 'tv' &&
-                            widget.offlineFilePath == null)
-                          IconButton(
-                            icon: const Icon(Icons.video_library_outlined,
-                                color: Colors.white, size: 26),
-                            onPressed: _openEpisodesDrawer,
-                          ),
-                      ],
-                    ),
-                  ),
-
-                  // Center Play/Pause/Seek Controls
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      IconButton(
-                        icon: const Icon(Icons.replay_10,
-                            color: Colors.white, size: 38),
-                        onPressed: () => _seekBy(-10),
-                      ),
-                      const SizedBox(width: 40),
-                      IconButton(
-                        icon: Icon(
-                            _isPlaying
-                                ? Icons.pause_circle_filled
-                                : Icons.play_circle_filled,
-                            color: Colors.white,
-                            size: 64),
-                        onPressed: _togglePlayPause,
-                      ),
-                      const SizedBox(width: 40),
-                      IconButton(
-                        icon: const Icon(Icons.forward_10,
-                            color: Colors.white, size: 38),
-                        onPressed: () => _seekBy(10),
-                      ),
-                    ],
-                  ),
-
-                  // Bottom Progress Bar & Time
-                  Padding(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 24, vertical: 12),
-                    child: Column(
-                      children: [
-                        SliderTheme(
-                          data: SliderTheme.of(context).copyWith(
-                            trackHeight: 3.5,
-                            thumbShape: const RoundSliderThumbShape(
-                                enabledThumbRadius: 6.0),
-                            overlayShape: const RoundSliderOverlayShape(
-                                overlayRadius: 12.0),
-                            activeTrackColor: const Color(0xFFE50914),
-                            inactiveTrackColor: Colors.white24,
-                            thumbColor: const Color(0xFFE50914),
-                          ),
-                          child: Slider(
-                            value: _position.inSeconds
-                                .toDouble()
-                                .clamp(0.0, _duration.inSeconds.toDouble()),
-                            max: _duration.inSeconds > 0
-                                ? _duration.inSeconds.toDouble()
-                                : 1.0,
-                            onChanged: (val) {
-                              _videoPlayerController
-                                  ?.seekTo(Duration(seconds: val.toInt()));
-                              _resetOverlayTimer();
-                            },
-                          ),
-                        ),
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text(
-                              _formatDuration(_position),
-                              style: const TextStyle(
-                                  color: Colors.white70, fontSize: 12),
-                            ),
-                            Text(
-                              _formatDuration(_duration),
-                              style: const TextStyle(
-                                  color: Colors.white70, fontSize: 12),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-
-          // 6. Next Episode Countdown Overlay (binge prompt)
-          if (_showNextEpisodeCountdown)
-            Positioned(
-              bottom: 80,
-              right: 28,
-              child: Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.85),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: Colors.white24),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      'Next Episode in $_nextEpisodeCountdownSeconds...',
-                      style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w500),
-                    ),
-                    const SizedBox(width: 12),
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFFE50914),
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 14, vertical: 8),
-                      ),
-                      onPressed: _playNextEpisode,
-                      child: const Text('Play Next',
-                          style: TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold)),
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.close,
-                          color: Colors.white70, size: 18),
-                      onPressed: () {
-                        _countdownTimer?.cancel();
-                        setState(() => _showNextEpisodeCountdown = false);
-                      },
-                    ),
-                  ],
-                ),
-              ),
-            ),
+          IconButton(
+            tooltip: 'Close',
+            icon: const Icon(Icons.close, color: Colors.white70),
+            onPressed: () => Navigator.pop(sheetContext),
+          ),
         ],
       ),
     );
   }
+
+  // ------------------------------------------------------------- lifecycle
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (_disposed) return;
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
+      _saveProgressNow();
+      final controller = _controller;
+      if (controller != null && controller.value.isPlaying) {
+        controller.pause();
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    _generation++;
+    _saveProgressNow();
+    _controlsTimer?.cancel();
+    _progressTimer?.cancel();
+    _nextPromptTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    final controller = _controller;
+    _controller = null;
+    controller?.removeListener(_onVideoTick);
+    controller?.dispose();
+    _position.dispose();
+    _duration.dispose();
+    _playing.dispose();
+    _buffering.dispose();
+    _subtitleText.dispose();
+    unawaited(_leavePlayerMode());
+    super.dispose();
+  }
+
+  // ------------------------------------------------------------------- UI
+
+  @override
+  Widget build(BuildContext context) {
+    return PopScope(
+      canPop: true,
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) _saveProgressNow();
+      },
+      child: Scaffold(
+        backgroundColor: Colors.black,
+        body: Stack(
+          fit: StackFit.expand,
+          children: [
+            _buildVideoSurface(),
+            if (_phase == _PlayerPhase.failure) _buildFailure(),
+            if (_phase == _PlayerPhase.ended) _buildEnded(),
+            if (_phase != _PlayerPhase.failure &&
+                _phase != _PlayerPhase.ended) ...[
+              _buildBuffering(),
+              _buildSubtitleOverlay(),
+              if (_phase == _PlayerPhase.ready) _buildGestures(),
+              if (_phase == _PlayerPhase.ready) _buildSeekRipples(),
+              if (_phase != _PlayerPhase.ready) _buildLoading(),
+              if (_phase == _PlayerPhase.ready && _showControls && !_locked)
+                _buildHud(),
+              if (_phase == _PlayerPhase.ready && _locked)
+                _buildLockedOverlay(),
+              if (_showNextPrompt) _buildNextPrompt(),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildVideoSurface() {
+    final controller = _controller;
+    if (controller != null &&
+        controller.value.isInitialized &&
+        _phase != _PlayerPhase.failure) {
+      return Center(
+        child: AspectRatio(
+          aspectRatio: controller.value.aspectRatio > 0
+              ? controller.value.aspectRatio
+              : 16 / 9,
+          child: VideoPlayer(controller),
+        ),
+      );
+    }
+    return const ColoredBox(color: Colors.black);
+  }
+
+  Widget _buildLoading() {
+    return FlixLoadingView(
+      message: _statusMessage,
+      detail: _phase == _PlayerPhase.initializing
+          ? 'Rendering video with the built-in player'
+          : null,
+    );
+  }
+
+  Widget _buildBuffering() {
+    return ValueListenableBuilder<bool>(
+      valueListenable: _buffering,
+      builder: (context, buffering, _) {
+        if (!buffering || _phase != _PlayerPhase.ready) {
+          return const SizedBox.shrink();
+        }
+        return const Center(child: FlixBufferingIndicator());
+      },
+    );
+  }
+
+  Widget _buildSubtitleOverlay() {
+    return ValueListenableBuilder<String>(
+      valueListenable: _subtitleText,
+      builder: (context, text, _) {
+        if (text.isEmpty || _phase != _PlayerPhase.ready) {
+          return const SizedBox.shrink();
+        }
+        return Positioned(
+          left: 24,
+          right: 24,
+          bottom: _showControls ? 112 : 34,
+          child: IgnorePointer(
+            child: Center(
+              child: Container(
+                constraints: const BoxConstraints(maxWidth: 760),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.76),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(
+                  text,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 17,
+                    height: 1.28,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildGestures() {
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _toggleControls,
+            onDoubleTapDown: (details) {
+              final width = MediaQuery.of(context).size.width;
+              if (details.localPosition.dx < width / 2) {
+                _seekBy(-10);
+              } else {
+                _seekBy(10);
+              }
+            },
+            onDoubleTap: () {},
+          ),
+        ),
+        if (_showControls && !_locked)
+          Positioned(
+            left: 0,
+            right: 0,
+            top: 0,
+            bottom: 0,
+            child: IgnorePointer(
+              child: Container(
+                decoration: const BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [
+                      Colors.black54,
+                      Colors.transparent,
+                      Colors.transparent,
+                      Colors.black87,
+                    ],
+                    begin: Alignment.topCenter,
+                    end: Alignment.bottomCenter,
+                    stops: [0, 0.28, 0.6, 1],
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildSeekRipples() {
+    return Stack(
+      children: [
+        if (_showLeftRipple)
+          Center(
+            child: FractionalTranslation(
+              translation: const Offset(-0.65, 0),
+              child: _ripple(const Icon(Icons.replay_10, color: Colors.white), '-10s'),
+            ),
+          ),
+        if (_showRightRipple)
+          Center(
+            child: FractionalTranslation(
+              translation: const Offset(0.65, 0),
+              child: _ripple(
+                const Icon(Icons.forward_10, color: Colors.white),
+                '+10s',
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _ripple(Widget icon, String label) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.55),
+        borderRadius: BorderRadius.circular(30),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          icon,
+          const SizedBox(width: 8),
+          Text(
+            label,
+            style: const TextStyle(
+              color: Colors.white,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHud() {
+    final title = widget.item.mediaType == 'tv'
+        ? '${widget.item.title}  ·  S$_currentSeason:E$_currentEpisode'
+        : widget.item.title;
+    final episodeName = _episodeNameFor(_currentSeason, _currentEpisode);
+    return SafeArea(
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(10, 8, 10, 0),
+            child: Row(
+              children: [
+                _hudIcon(
+                  icon: Icons.close,
+                  tooltip: 'Close player',
+                  onPressed: () => Navigator.of(context).maybePop(),
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      if (episodeName.isNotEmpty)
+                        Text(
+                          episodeName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.white70,
+                            fontSize: 12,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                _hudIcon(
+                  icon: Icons.subtitles_outlined,
+                  tooltip: 'Audio and subtitles',
+                  onPressed: () => unawaited(_openSubtitleSheet()),
+                ),
+                _hudIcon(
+                  icon: Icons.more_vert,
+                  tooltip: 'More options',
+                  onPressed: () => unawaited(_openMenu()),
+                ),
+              ],
+            ),
+          ),
+          const Spacer(),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              _centerControl(
+                icon: Icons.replay_10,
+                tooltip: 'Rewind 10 seconds',
+                size: 34,
+                onPressed: () => _seekBy(-10),
+              ),
+              const SizedBox(width: 36),
+              ValueListenableBuilder<bool>(
+                valueListenable: _playing,
+                builder: (context, playing, _) {
+                  return IconButton(
+                    tooltip: playing ? 'Pause' : 'Play',
+                    iconSize: 62,
+                    color: Colors.white,
+                    icon: Icon(
+                      playing
+                          ? Icons.pause_circle_filled
+                          : Icons.play_circle_fill,
+                    ),
+                    onPressed: () {
+                      _togglePlayPause();
+                      _armControlsTimer();
+                    },
+                  );
+                },
+              ),
+              const SizedBox(width: 36),
+              _centerControl(
+                icon: Icons.forward_10,
+                tooltip: 'Forward 10 seconds',
+                size: 34,
+                onPressed: () => _seekBy(10),
+              ),
+            ],
+          ),
+          const Spacer(),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+            child: ValueListenableBuilder<Duration>(
+              valueListenable: _duration,
+              builder: (context, duration, _) {
+                return ValueListenableBuilder<Duration>(
+                  valueListenable: _position,
+                  builder: (context, position, _) {
+                    final total = duration.inMilliseconds.toDouble();
+                    final current = _dragValue ??
+                        position.inMilliseconds
+                            .clamp(0, total <= 0 ? 0 : total.toInt())
+                            .toDouble();
+                    return Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SliderTheme(
+                          data: SliderTheme.of(context).copyWith(
+                            trackHeight: 3,
+                            activeTrackColor: _accent,
+                            inactiveTrackColor: Colors.white24,
+                            thumbColor: _accent,
+                            overlayColor: _accent.withValues(alpha: 0.2),
+                            thumbShape: const RoundSliderThumbShape(
+                              enabledThumbRadius: 6,
+                            ),
+                          ),
+                          child: Slider(
+                            value: total <= 0 ? 0 : current.clamp(0, total),
+                            max: total <= 0 ? 1 : total,
+                            onChanged: total <= 0
+                                ? null
+                                : (value) => setState(() => _dragValue = value),
+                            onChangeEnd: total <= 0
+                                ? null
+                                : (value) {
+                                    setState(() => _dragValue = null);
+                                    _seekTo(
+                                      Duration(milliseconds: value.round()),
+                                    );
+                                  },
+                          ),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 4),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              Text(
+                                _formatDuration(
+                                  Duration(
+                                    milliseconds: current.round(),
+                                  ),
+                                ),
+                                style: const TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 12,
+                                  fontFeatures: [FontFeature.tabularFigures()],
+                                ),
+                              ),
+                              Text(
+                                _formatDuration(duration),
+                                style: const TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 12,
+                                  fontFeatures: [FontFeature.tabularFigures()],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            padding: const EdgeInsets.fromLTRB(10, 0, 10, 8),
+            child: Row(
+              children: [
+                _bottomAction(
+                  icon: Icons.speed,
+                  label: 'Speed (${_formatSpeed(_speed)})',
+                  onPressed: () => unawaited(_openSpeedSheet()),
+                ),
+                _bottomAction(
+                  icon: _locked ? Icons.lock : Icons.lock_open,
+                  label: 'Lock',
+                  onPressed: _toggleLock,
+                ),
+                if (widget.item.mediaType == 'tv' && !_isOffline)
+                  _bottomAction(
+                    icon: Icons.video_library_outlined,
+                    label: 'Episodes',
+                    onPressed: () => unawaited(_openEpisodesSheet()),
+                  ),
+                _bottomAction(
+                  icon: Icons.subtitles_outlined,
+                  label: 'Audio & Subtitles',
+                  onPressed: () => unawaited(_openSubtitleSheet()),
+                ),
+                if (widget.item.mediaType == 'tv' &&
+                    !_isOffline &&
+                    _nextEpisode != null)
+                  _bottomAction(
+                    icon: Icons.skip_next,
+                    label: 'Next Episode',
+                    onPressed: () => unawaited(_playNextEpisode()),
+                  ),
+                if (!_isOffline)
+                  _bottomAction(
+                    icon: Icons.high_quality,
+                    label: _selectedSource?.resolution ?? 'Quality',
+                    onPressed: () => unawaited(_openSourcesSheet()),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _hudIcon({
+    required IconData icon,
+    required String tooltip,
+    required VoidCallback onPressed,
+  }) {
+    return IconButton(
+      tooltip: tooltip,
+      icon: Icon(icon, color: Colors.white, size: 24),
+      onPressed: () {
+        onPressed();
+        _armControlsTimer();
+      },
+    );
+  }
+
+  Widget _centerControl({
+    required IconData icon,
+    required String tooltip,
+    required double size,
+    required VoidCallback onPressed,
+  }) {
+    return IconButton(
+      tooltip: tooltip,
+      iconSize: size,
+      color: Colors.white,
+      icon: Icon(icon),
+      onPressed: () {
+        onPressed();
+        _armControlsTimer();
+      },
+    );
+  }
+
+  Widget _bottomAction({
+    required IconData icon,
+    required String label,
+    required VoidCallback onPressed,
+  }) {
+    return TextButton.icon(
+      onPressed: () {
+        onPressed();
+        _armControlsTimer();
+      },
+      style: TextButton.styleFrom(
+        foregroundColor: Colors.white,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        minimumSize: const Size(0, 44),
+      ),
+      icon: Icon(icon, size: 18),
+      label: Text(
+        label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600),
+      ),
+    );
+  }
+
+  Widget _buildLockedOverlay() {
+    return SafeArea(
+      child: Align(
+        alignment: Alignment.topRight,
+        child: Padding(
+          padding: const EdgeInsets.all(10),
+          child: Material(
+            color: Colors.black54,
+            shape: const CircleBorder(),
+            child: IconButton(
+              tooltip: 'Unlock controls',
+              icon: const Icon(Icons.lock, color: Colors.white),
+              onPressed: _toggleLock,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNextPrompt() {
+    return Positioned(
+      right: 20,
+      bottom: 84,
+      child: Material(
+        color: Colors.black.withValues(alpha: 0.86),
+        borderRadius: BorderRadius.circular(10),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text(
+                    'Up next',
+                    style: TextStyle(
+                      color: Colors.white54,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.6,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    _autoplayNext
+                        ? 'Next episode in ${_nextCountdown}s'
+                        : 'Next episode ready',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(width: 12),
+              TextButton(
+                onPressed: () => unawaited(_playNextEpisode()),
+                style: TextButton.styleFrom(foregroundColor: Colors.white),
+                child: const Text('Play Next'),
+              ),
+              IconButton(
+                tooltip: 'Dismiss',
+                icon: const Icon(Icons.close, color: Colors.white70, size: 18),
+                onPressed: _dismissNextPrompt,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildEnded() {
+    final hasNext = _nextEpisode != null;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        const ColoredBox(color: Colors.black87),
+        Center(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Finished',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 10,
+                  alignment: WrapAlignment.center,
+                  children: [
+                    OutlinedButton.icon(
+                      onPressed: () {
+                        _seekTo(Duration.zero);
+                        _safeSetState(() => _phase = _PlayerPhase.ready);
+                        _togglePlayPause();
+                      },
+                      icon: const Icon(Icons.replay, size: 18),
+                      label: const Text('Watch again'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: Colors.white,
+                        side: const BorderSide(color: Colors.white38),
+                      ),
+                    ),
+                    if (hasNext)
+                      ElevatedButton.icon(
+                        onPressed: () => unawaited(_playNextEpisode()),
+                        icon: const Icon(Icons.skip_next, size: 18),
+                        label: const Text('Next episode'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.white,
+                          foregroundColor: Colors.black,
+                        ),
+                      ),
+                    TextButton(
+                      onPressed: () => Navigator.of(context).maybePop(),
+                      child: const Text(
+                        'Back to details',
+                        style: TextStyle(color: Colors.white70),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildFailure() {
+    final failure = _failure ??
+        const ProviderException(
+          ProviderErrorType.unknown,
+          'Playback could not start.',
+        );
+    final canChooseVersion = _candidates.isNotEmpty;
+    return SafeArea(
+      child: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 560),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const FlixWordmark(fontSize: 30),
+                const SizedBox(height: 18),
+                Text(
+                  ProviderMessages.titleFor(failure.type),
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  ProviderMessages.bodyFor(failure.type),
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 13,
+                    height: 1.5,
+                  ),
+                ),
+                if (canChooseVersion) ...[
+                  const SizedBox(height: 18),
+                  const Text(
+                    'Available versions',
+                    style: TextStyle(
+                      color: Colors.white54,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  for (final candidate in _candidates)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: OutlinedButton(
+                        onPressed: () {
+                          _chosenMatch = candidate;
+                          unawaited(_startPlayback(forceRefresh: true));
+                        },
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.white,
+                          side: const BorderSide(color: Colors.white24),
+                          minimumSize: const Size(double.infinity, 44),
+                        ),
+                        child: Text(
+                          candidate.displayLabel,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.center,
+                        ),
+                      ),
+                    ),
+                ],
+                const SizedBox(height: 18),
+                Wrap(
+                  spacing: 10,
+                  runSpacing: 10,
+                  alignment: WrapAlignment.center,
+                  children: [
+                    if (!_isOffline)
+                      ElevatedButton.icon(
+                        onPressed: () => unawaited(
+                          _startPlayback(forceRefresh: true),
+                        ),
+                        icon: const Icon(Icons.refresh, size: 18),
+                        label: Text(
+                          ProviderMessages.actionLabel(failure.type),
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: _accent,
+                          foregroundColor: Colors.white,
+                        ),
+                      ),
+                    if (widget.item.mediaType == 'tv' &&
+                        !_isOffline &&
+                        _nextEpisode != null)
+                      OutlinedButton.icon(
+                        onPressed: () => unawaited(_playNextEpisode()),
+                        icon: const Icon(Icons.skip_next, size: 18),
+                        label: const Text('Next episode'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.white,
+                          side: const BorderSide(color: Colors.white24),
+                        ),
+                      ),
+                    TextButton(
+                      onPressed: () => Navigator.of(context).maybePop(),
+                      child: const Text(
+                        'Back to details',
+                        style: TextStyle(color: Colors.white70),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  static String _formatDuration(Duration duration) {
+    final total = duration.inSeconds;
+    final hours = total ~/ 3600;
+    final minutes = (total % 3600) ~/ 60;
+    final seconds = total % 60;
+    if (hours > 0) {
+      return '$hours:${minutes.toString().padLeft(2, '0')}:'
+          '${seconds.toString().padLeft(2, '0')}';
+    }
+    return '${minutes.toString().padLeft(2, '0')}:'
+        '${seconds.toString().padLeft(2, '0')}';
+  }
+
+  static String _formatSpeed(double value) =>
+      value == value.roundToDouble() ? value.toStringAsFixed(0) : '$value';
 }

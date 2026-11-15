@@ -1,7 +1,10 @@
+import 'dart:convert';
+
 import 'package:http/http.dart' as http;
 
 import '../core/constants/api_constants.dart';
 import '../models/caption_track.dart';
+import 'download_validation.dart';
 
 class SubtitleCue {
   final Duration start;
@@ -12,40 +15,114 @@ class SubtitleCue {
       {required this.start, required this.end, required this.text});
 }
 
+/// A validated subtitle file ready to be written next to its video.
+class SubtitleFile {
+  final String text;
+  final String extension;
+  final String language;
+  final String languageName;
+  final int sizeBytes;
+
+  const SubtitleFile({
+    required this.text,
+    required this.extension,
+    required this.language,
+    required this.languageName,
+    required this.sizeBytes,
+  });
+}
+
 class SubtitleService {
-  static Future<List<SubtitleCue>> fetch(CaptionTrack track) async {
-    return parse(await fetchText(track));
+  static const int maxSubtitleBytes = 8 * 1024 * 1024;
+
+  static Future<List<SubtitleCue>> fetch(
+    CaptionTrack track, {
+    http.Client? client,
+  }) async {
+    return parse(await fetchText(track, client: client));
   }
 
-  static Future<String> fetchText(CaptionTrack track) async {
+  static Future<String> fetchText(
+    CaptionTrack track, {
+    http.Client? client,
+  }) async {
     final uri = Uri.tryParse(track.url);
-    if (uri == null || uri.scheme != 'https') {
+    if (uri == null || uri.scheme != 'https' || uri.host.isEmpty) {
       throw const FormatException('This subtitle link is not valid.');
     }
 
     Object? lastError;
-    for (final profile in ApiConstants.zarhostingMediaHeaderProfiles) {
-      try {
-        final response = await http
-            .get(uri, headers: profile)
-            .timeout(const Duration(seconds: 15));
-        if (response.statusCode >= 200 && response.statusCode < 300) {
-          final body = response.body.trim();
-          if (body.isEmpty) return '';
-          return body;
-        }
-        if (![401, 403, 426, 428, 429].contains(response.statusCode)) {
-          throw FormatException(
+    final httpClient = client ?? http.Client();
+    try {
+      for (final profile in ApiConstants.zarhostingMediaHeaderProfiles) {
+        try {
+          final response = await httpClient
+              .get(uri, headers: profile)
+              .timeout(const Duration(seconds: 15));
+          if (response.statusCode >= 200 && response.statusCode < 300) {
+            if (response.bodyBytes.length > maxSubtitleBytes) {
+              throw const FormatException('This subtitle file is too large.');
+            }
+            // Subtitle files are UTF-8 in practice; allowMalformed keeps a
+            // stray legacy byte from breaking the whole track.
+            final text = utf8
+                .decode(response.bodyBytes, allowMalformed: true)
+                .replaceFirst('\uFEFF', '')
+                .trim();
+            if (text.isEmpty) {
+              throw const FormatException(
+                  'The subtitle server returned an empty file.');
+            }
+            _rejectMarkup(text);
+            return text;
+          }
+          if (![401, 403, 426, 428, 429].contains(response.statusCode)) {
+            throw FormatException(
+                'Subtitle server returned HTTP ${response.statusCode}.');
+          }
+          lastError = FormatException(
               'Subtitle server returned HTTP ${response.statusCode}.');
+        } catch (error) {
+          lastError = error;
         }
-        lastError = FormatException(
-            'Subtitle server returned HTTP ${response.statusCode}.');
-      } catch (error) {
-        lastError = error;
       }
+    } finally {
+      if (client == null) httpClient.close();
     }
     throw FormatException(
-        'The selected subtitle could not be loaded: $lastError');
+        'The selected subtitle could not be loaded: '
+        '${lastError is FormatException ? lastError.message : 'network error'}');
+  }
+
+  /// Downloads and validates a subtitle, rejecting HTML/error pages and files
+  /// with no readable cues so a broken subtitle is never reported as saved.
+  static Future<SubtitleFile> fetchValidated(
+    CaptionTrack track, {
+    http.Client? client,
+  }) async {
+    final text = await fetchText(track, client: client);
+    final cues = parse(text);
+    if (cues.isEmpty) {
+      throw const FormatException(
+        'This subtitle file has no readable captions.',
+      );
+    }
+    final extension = DownloadValidation.subtitleExtension(track.url, text);
+    return SubtitleFile(
+      text: text,
+      extension: extension,
+      language: track.language,
+      languageName: track.languageName,
+      sizeBytes: utf8.encode(text).length,
+    );
+  }
+
+  static void _rejectMarkup(String text) {
+    final prefix = text.trimLeft();
+    if (DownloadValidation.looksLikeMarkup(prefix)) {
+      throw const FormatException(
+          'The subtitle server returned a web page instead of subtitles.');
+    }
   }
 
   static List<SubtitleCue> parse(String raw) {
@@ -75,8 +152,9 @@ class SubtitleService {
           .replaceAll('&gt;', '>')
           .replaceAll('&nbsp;', ' ')
           .trim();
-      if (text.isNotEmpty)
+      if (text.isNotEmpty) {
         cues.add(SubtitleCue(start: start, end: end, text: text));
+      }
     }
     cues.sort((a, b) => a.start.compareTo(b.start));
     return cues;

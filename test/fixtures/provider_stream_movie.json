@@ -1,0 +1,70 @@
+{
+  "subject_id": "6391474290696802080",
+  "se": 0,
+  "ep": 0,
+  "has_resource": true,
+  "sources": [
+    {
+      "resolution": "1080p",
+      "format": "MP4",
+      "url": "https://media.example.com/tran-audio/movie-1080.mp4?sign=fixture&t=123",
+      "size": "2414667149",
+      "duration": 8888,
+      "codec": "h264",
+      "vip_locked": false
+    },
+    {
+      "resolution": "1080p",
+      "format": "DASH",
+      "url": "https://media.example.com/dash/index.mpd",
+      "size": null,
+      "duration": 8888,
+      "codec": "hevc/h264",
+      "vip_locked": false
+    },
+    {
+      "resolution": "720p",
+      "format": "MP4",
+      "url": "https://media.example.com/mkv/movie-720.mp4",
+      "size": "402289429",
+      "duration": 8888,
+      "codec": "h264",
+      "vip_locked": false
+    },
+    {
+      "resolution": "2160p",
+      "format": "MP4",
+      "url": "https://media.example.com/vip/movie-2160.mp4",
+      "size": "9000000000",
+      "duration": 8888,
+      "vip_locked": true
+    },
+    {
+      "resolution": "480p",
+      "format": "MP4",
+      "url": "https://media.example.com/trailer/trailer.mp4",
+      "size": "9000000",
+      "duration": 120,
+      "source": "Official Trailer",
+      "vip_locked": false
+    }
+  ],
+  "hls": [],
+  "dash": [
+    {
+      "format": "DASH",
+      "id": "3017343561827342496",
+      "url": "https://media.example.com/dash/index_web.mpd",
+      "resolutions": "1080,720,480",
+      "size": "3591595268",
+      "duration": 8888,
+      "codecName": "hevc",
+      "signCookie": "Edge-Cache-Cookie=fixture",
+      "signHeaderKey": "X-MB-Token",
+      "vipLocked": false
+    }
+  ],
+  "free_episodes": 999,
+  "limited": false,
+  "note": null
+}

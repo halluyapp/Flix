@@ -1,0 +1,24 @@
+{
+  "subject_id": "6391474290696802080",
+  "se": 0,
+  "ep": 0,
+  "count": 2,
+  "captions": [
+    {
+      "id": "5968867068744189216",
+      "lan": "ar",
+      "lanName": "العربية",
+      "url": "https://subs.example.com/subtitle/arabic.srt",
+      "size": "111974",
+      "delay": 0
+    },
+    {
+      "id": "7760407165030334888",
+      "lan": "en",
+      "lanName": "English",
+      "url": "https://subs.example.com/subtitle/english.srt",
+      "size": "240000",
+      "delay": 0
+    }
+  ]
+}

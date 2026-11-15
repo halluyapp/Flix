@@ -1,0 +1,27 @@
+{
+  "query": "The Thing",
+  "items": [
+    {
+      "name": "The Thing",
+      "subject_id": "100",
+      "slug": "the-thing-1982",
+      "type": "movie",
+      "base_title": "The Thing",
+      "year": "1982",
+      "audio": "Original",
+      "dub": false,
+      "has_resource": true
+    },
+    {
+      "name": "The Thing",
+      "subject_id": "200",
+      "slug": "the-thing-2011",
+      "type": "movie",
+      "base_title": "The Thing",
+      "year": "2011",
+      "audio": "Original",
+      "dub": false,
+      "has_resource": true
+    }
+  ]
+}

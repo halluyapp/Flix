@@ -1,0 +1,35 @@
+{
+  "query": "Inception",
+  "page": 1,
+  "per_page": 2,
+  "count": 2,
+  "has_more": true,
+  "items": [
+    {
+      "name": "Inception [Hindi]",
+      "subject_id": "977486567826752424",
+      "slug": "inception-hindi-scvPmbJTca1",
+      "type": "movie",
+      "base_title": "Inception",
+      "year": "2010",
+      "rating": "8.8",
+      "audio": "Hindi",
+      "dub": true,
+      "has_resource": true,
+      "subtitles": ["English"]
+    },
+    {
+      "name": "Inception",
+      "subject_id": "6391474290696802080",
+      "slug": "inception-e1BOR6f19C7",
+      "type": "movie",
+      "base_title": "Inception",
+      "year": "2010",
+      "rating": "8.8",
+      "audio": "Original",
+      "dub": false,
+      "has_resource": true,
+      "subtitles": ["English", "Arabic"]
+    }
+  ]
+}

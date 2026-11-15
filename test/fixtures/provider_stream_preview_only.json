@@ -1,0 +1,27 @@
+{
+  "subject_id": "6391474290696802080",
+  "se": 0,
+  "ep": 0,
+  "has_resource": true,
+  "sources": [
+    {
+      "resolution": "480p",
+      "format": "MP4",
+      "url": "https://media.example.com/trailer/trailer.mp4",
+      "size": "9000000",
+      "duration": 95,
+      "source": "Trailer",
+      "vip_locked": false
+    },
+    {
+      "resolution": "1080p",
+      "format": "MP4",
+      "url": "https://media.example.com/vip/locked.mp4",
+      "size": "9000000000",
+      "duration": 8888,
+      "vip_locked": true
+    }
+  ],
+  "hls": [],
+  "dash": []
+}

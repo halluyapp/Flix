@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../services/diagnostics_service.dart';
 import '../services/download_service.dart';
 import '../services/user_state_service.dart';
 import '../widgets/media_card.dart';
@@ -111,6 +112,55 @@ class MyFlixScreen extends StatelessWidget {
                         ),
                       const SizedBox(width: 4),
                       const Icon(Icons.chevron_right, color: Colors.white54),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            Material(
+              color: const Color(0xFF202020),
+              borderRadius: BorderRadius.circular(8),
+              child: InkWell(
+                borderRadius: BorderRadius.circular(8),
+                onTap: () async {
+                  final shared =
+                      await DiagnosticsService.instance.shareExport();
+                  if (!context.mounted || shared) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text(
+                        'Diagnostics could not be shared on this device.',
+                      ),
+                    ),
+                  );
+                },
+                child: const Padding(
+                  padding:
+                      EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+                  child: Row(
+                    children: [
+                      Icon(Icons.bug_report_outlined,
+                          color: Colors.white70, size: 24),
+                      SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('Export diagnostics',
+                                style: TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.w700,
+                                    fontSize: 14)),
+                            SizedBox(height: 3),
+                            Text(
+                                'Share a sanitized local log of playback and download issues',
+                                style: TextStyle(
+                                    color: Colors.white54, fontSize: 12)),
+                          ],
+                        ),
+                      ),
+                      Icon(Icons.ios_share, color: Colors.white54, size: 18),
                     ],
                   ),
                 ),

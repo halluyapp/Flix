@@ -5,7 +5,7 @@ import 'package:provider/provider.dart';
 import '../models/provider_clip.dart';
 import '../services/clips_service.dart';
 import '../services/user_state_service.dart';
-import '../services/zarhosting_service.dart';
+import '../models/provider_match.dart';
 import 'player_screen.dart';
 
 class ClipsScreen extends StatefulWidget {
@@ -487,18 +487,20 @@ class _ClipsScreenState extends State<ClipsScreen> {
   }
 
   void _play(ProviderClip clip) {
-    final target = ZarhostingTarget(
+    final match = ProviderMatch(
       subjectId: clip.subjectId,
       detailPath: clip.detailPath,
       title: clip.title,
+      baseTitle: clip.title,
       year: clip.year,
       isSeries: false,
+      confidence: 1,
     );
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => PlayerScreen(
           item: clip.toMediaItem(),
-          providerTarget: target,
+          providerMatch: match,
         ),
       ),
     );
