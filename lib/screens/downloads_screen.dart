@@ -478,9 +478,20 @@ class _DownloadCard extends StatelessWidget {
                   runSpacing: 4,
                   children: [
                     _chip(job.resolution),
-                    _chip(job.isComplete ? 'Offline ready' : job.statusLabel),
+                    _chip(
+                      job.isComplete
+                          ? 'Offline ready'
+                          : job.status == 'failed'
+                              ? 'Download interrupted'
+                              : job.statusLabel,
+                    ),
                     if (job.subtitles.isNotEmpty)
-                      _chip(job.subtitleSummary, highlight: true),
+                      _chip(
+                        '${job.subtitles.length} subtitle'
+                        '${job.subtitles.length == 1 ? '' : 's'} · '
+                        '${job.subtitleSummary}',
+                        highlight: true,
+                      ),
                     if (missingFile) _chip('File missing', danger: true),
                   ],
                 ),

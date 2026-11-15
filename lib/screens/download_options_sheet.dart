@@ -337,20 +337,28 @@ class _DownloadOptionsSheetState extends State<DownloadOptionsSheet> {
               children: [
                 const Expanded(child: _SectionLabel('SUBTITLES')),
                 TextButton(
-                  onPressed: _starting || captions.isEmpty
+                  onPressed: _starting ||
+                          captions.isEmpty ||
+                          _selectedLanguages.length == captions.length
                       ? null
                       : () => setState(() {
-                            if (_selectedLanguages.length == captions.length) {
-                              _selectedLanguages.clear();
-                            } else {
-                              _selectedLanguages
-                                ..clear()
-                                ..addAll(captions.map((c) => c.language));
-                            }
+                            _selectedLanguages
+                              ..clear()
+                              ..addAll(captions.map((c) => c.language));
                           }),
-                  child: Text(
-                    _selectedLanguages.isEmpty ? 'All' : 'None',
-                    style: const TextStyle(color: Colors.white70),
+                  child: const Text(
+                    'All',
+                    style: TextStyle(color: Colors.white70),
+                  ),
+                ),
+                TextButton(
+                  onPressed:
+                      _starting || _selectedLanguages.isEmpty
+                          ? null
+                          : () => setState(_selectedLanguages.clear),
+                  child: const Text(
+                    'None',
+                    style: TextStyle(color: Colors.white70),
                   ),
                 ),
               ],
