@@ -50,7 +50,6 @@ void main() {
       expect(service.hasSuccessfulSupabaseResponse, isFalse);
     });
   });
-}
 
   group('TmdbService getSeasons discovery', () {
     test('probes season endpoints when direct /tv/{id} endpoint is rejected', () async {
@@ -90,3 +89,4 @@ void main() {
       expect(seasons[1].episodeCount, 1);
     });
   });
+}
