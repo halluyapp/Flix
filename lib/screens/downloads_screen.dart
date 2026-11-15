@@ -319,7 +319,7 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
             OfflineDownload? target;
             for (final ep in episodes) {
               final prog = userState.progressFor(
-                ep.item.id,
+                ep.item,
                 season: ep.season,
                 episode: ep.episode,
               );
@@ -596,8 +596,8 @@ class _MovieDownloadCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final userState = context.watch<UserStateService>();
-    final progress = userState.progressFor(job.item.id);
-    final hasProgress = progress != null && progress.position > 0 && !progress.isCompleted;
+    final progress = userState.progressFor(job.item);
+    final hasProgress = progress != null && progress.positionSeconds > 0 && !progress.isCompleted;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
@@ -657,7 +657,7 @@ class _MovieDownloadCard extends StatelessWidget {
                         child: ClipRRect(
                           borderRadius: const BorderRadius.vertical(bottom: Radius.circular(6)),
                           child: LinearProgressIndicator(
-                            value: progress.fraction,
+                            value: progress.progressFraction,
                             minHeight: 3.5,
                             backgroundColor: Colors.white24,
                             valueColor: const AlwaysStoppedAnimation(_accent),
@@ -700,7 +700,7 @@ class _MovieDownloadCard extends StatelessWidget {
                                 borderRadius: BorderRadius.circular(4),
                               ),
                               child: Text(
-                                'Resume ${progress.position ~/ 60}m',
+                                'Resume ${progress.positionSeconds ~/ 60}m',
                                 style: const TextStyle(
                                   color: Colors.white,
                                   fontSize: 10.5,
@@ -853,11 +853,11 @@ class _EpisodeDownloadTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final userState = context.watch<UserStateService>();
     final progress = userState.progressFor(
-      job.item.id,
+      job.item,
       season: job.season,
       episode: job.episode,
     );
-    final hasProgress = progress != null && progress.position > 0 && !progress.isCompleted;
+    final hasProgress = progress != null && progress.positionSeconds > 0 && !progress.isCompleted;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
@@ -915,7 +915,7 @@ class _EpisodeDownloadTile extends StatelessWidget {
                         child: ClipRRect(
                           borderRadius: const BorderRadius.vertical(bottom: Radius.circular(6)),
                           child: LinearProgressIndicator(
-                            value: progress.fraction,
+                            value: progress.progressFraction,
                             minHeight: 3,
                             backgroundColor: Colors.white24,
                             valueColor: const AlwaysStoppedAnimation(_accent),
@@ -950,7 +950,7 @@ class _EpisodeDownloadTile extends StatelessWidget {
                         Padding(
                           padding: const EdgeInsets.only(top: 3),
                           child: Text(
-                            'Resume ${progress.position ~/ 60}m of ${progress.duration ~/ 60}m',
+                            'Resume ${progress.positionSeconds ~/ 60}m of ${progress.durationSeconds ~/ 60}m',
                             style: const TextStyle(
                               color: _accent,
                               fontSize: 11,
