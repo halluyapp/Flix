@@ -27,6 +27,34 @@ import '../services/tmdb_service.dart';
 import '../services/user_state_service.dart';
 import '../widgets/flix_loading.dart';
 
+enum VideoAspectRatioMode {
+  fit,
+  fill,
+  original,
+}
+
+String _aspectRatioLabel(VideoAspectRatioMode mode) {
+  switch (mode) {
+    case VideoAspectRatioMode.fit:
+      return 'Fit';
+    case VideoAspectRatioMode.fill:
+      return 'Fill';
+    case VideoAspectRatioMode.original:
+      return '16:9';
+  }
+}
+
+String _aspectRatioDescription(VideoAspectRatioMode mode) {
+  switch (mode) {
+    case VideoAspectRatioMode.fit:
+      return 'Fit to Screen';
+    case VideoAspectRatioMode.fill:
+      return 'Zoom to Fill Screen';
+    case VideoAspectRatioMode.original:
+      return '16:9 Widescreen';
+  }
+}
+
 enum _PlayerPhase {
   resolvingMatch,
   resolvingStream,
@@ -126,6 +154,17 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _showNextPrompt = false;
   int _nextCountdown = 8;
   bool _advancing = false;
+  bool _isLandscape = true;
+  VideoAspectRatioMode _aspectRatioMode = VideoAspectRatioMode.fit;
+  bool _showAspectBadge = false;
+  Timer? _aspectBadgeTimer;
+  double _brightness = 1.0;
+  bool _showBrightnessIndicator = false;
+  Timer? _brightnessTimer;
+  double _volume = 1.0;
+  bool _showVolumeIndicator = false;
+  Timer? _volumeTimer;
+  bool _isPinching = false;
 
   @override
   void initState() {
@@ -135,6 +174,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     _currentEpisode = widget.startEpisode > 0 ? widget.startEpisode : 1;
     _offlineSubtitles = widget.offlineSubtitles;
     unawaited(_enterPlayerMode());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && !_disposed) {
+        unawaited(_enterPlayerMode());
+      }
+    });
     unawaited(_loadPreferences());
     if (_isOffline) {
       unawaited(_openOffline());
@@ -163,10 +207,16 @@ class _PlayerScreenState extends State<PlayerScreen>
   Future<void> _enterPlayerMode() async {
     try {
       await WakelockPlus.enable();
-      await SystemChrome.setPreferredOrientations(const [
-        DeviceOrientation.landscapeRight,
-        DeviceOrientation.landscapeLeft,
-      ]);
+      if (_isLandscape) {
+        await SystemChrome.setPreferredOrientations(const [
+          DeviceOrientation.landscapeRight,
+          DeviceOrientation.landscapeLeft,
+        ]);
+      } else {
+        await SystemChrome.setPreferredOrientations(const [
+          DeviceOrientation.portraitUp,
+        ]);
+      }
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     } catch (error) {
       DiagnosticsService.instance.record(
@@ -191,6 +241,52 @@ class _PlayerScreenState extends State<PlayerScreen>
         error: error,
       );
     }
+  }
+
+  Future<void> _toggleOrientation() async {
+    _isLandscape = !_isLandscape;
+    try {
+      if (_isLandscape) {
+        await SystemChrome.setPreferredOrientations(const [
+          DeviceOrientation.landscapeRight,
+          DeviceOrientation.landscapeLeft,
+        ]);
+      } else {
+        await SystemChrome.setPreferredOrientations(const [
+          DeviceOrientation.portraitUp,
+        ]);
+      }
+    } catch (error) {
+      DiagnosticsService.instance.record(
+        scope: 'player',
+        operation: 'toggle_orientation',
+        error: error,
+      );
+    }
+    _armControlsTimer();
+    _safeSetState(() {});
+  }
+
+  void _toggleAspectRatio() {
+    _safeSetState(() {
+      switch (_aspectRatioMode) {
+        case VideoAspectRatioMode.fit:
+          _aspectRatioMode = VideoAspectRatioMode.fill;
+          break;
+        case VideoAspectRatioMode.fill:
+          _aspectRatioMode = VideoAspectRatioMode.original;
+          break;
+        case VideoAspectRatioMode.original:
+          _aspectRatioMode = VideoAspectRatioMode.fit;
+          break;
+      }
+      _showAspectBadge = true;
+    });
+    _aspectBadgeTimer?.cancel();
+    _aspectBadgeTimer = Timer(const Duration(milliseconds: 1500), () {
+      if (mounted) _safeSetState(() => _showAspectBadge = false);
+    });
+    _armControlsTimer();
   }
 
   Future<void> _loadPreferences() async {
@@ -1582,6 +1678,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     _controlsTimer?.cancel();
     _progressTimer?.cancel();
     _nextPromptTimer?.cancel();
+    _aspectBadgeTimer?.cancel();
+    _brightnessTimer?.cancel();
+    _volumeTimer?.cancel();
     WidgetsBinding.instance.removeObserver(this);
     final controller = _controller;
     _controller = null;
@@ -1611,6 +1710,14 @@ class _PlayerScreenState extends State<PlayerScreen>
           fit: StackFit.expand,
           children: [
             _buildVideoSurface(),
+            if (_brightness < 1.0)
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: ColoredBox(
+                    color: Colors.black.withValues(alpha: (1.0 - _brightness) * 0.75),
+                  ),
+                ),
+              ),
             if (_phase == _PlayerPhase.failure) _buildFailure(),
             if (_phase == _PlayerPhase.ended) _buildEnded(),
             if (_phase != _PlayerPhase.failure &&
@@ -1619,9 +1726,15 @@ class _PlayerScreenState extends State<PlayerScreen>
               _buildSubtitleOverlay(),
               if (_phase == _PlayerPhase.ready) _buildGestures(),
               if (_phase == _PlayerPhase.ready) _buildSeekRipples(),
+              if (_showBrightnessIndicator) _buildBrightnessIndicator(),
+              if (_showVolumeIndicator) _buildVolumeIndicator(),
+              if (_showAspectBadge) _buildAspectRatioBadge(),
               if (_phase != _PlayerPhase.ready) _buildLoading(),
-              if (_phase == _PlayerPhase.ready && _showControls && !_locked)
+              if (_phase == _PlayerPhase.ready && _showControls && !_locked) ...[
                 _buildHud(),
+                if (MediaQuery.of(context).orientation == Orientation.portrait)
+                  _buildPortraitRotatePrompt(),
+              ],
               if (_phase == _PlayerPhase.ready && _locked)
                 _buildLockedOverlay(),
               if (_showNextPrompt) _buildNextPrompt(),
@@ -1637,14 +1750,43 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (controller != null &&
         controller.value.isInitialized &&
         _phase != _PlayerPhase.failure) {
-      return Center(
-        child: AspectRatio(
-          aspectRatio: controller.value.aspectRatio > 0
-              ? controller.value.aspectRatio
-              : 16 / 9,
-          child: VideoPlayer(controller),
-        ),
-      );
+      final videoAspect = controller.value.aspectRatio > 0
+          ? controller.value.aspectRatio
+          : 16 / 9;
+      final videoSize = controller.value.size;
+      final videoWidth = videoSize.width > 0 ? videoSize.width : 1920.0;
+      final videoHeight = videoSize.height > 0 ? videoSize.height : 1080.0;
+
+      Widget videoWidget = VideoPlayer(controller);
+
+      switch (_aspectRatioMode) {
+        case VideoAspectRatioMode.fit:
+          return Center(
+            child: AspectRatio(
+              aspectRatio: videoAspect,
+              child: videoWidget,
+            ),
+          );
+        case VideoAspectRatioMode.fill:
+          return SizedBox.expand(
+            child: FittedBox(
+              fit: BoxFit.cover,
+              clipBehavior: Clip.hardEdge,
+              child: SizedBox(
+                width: videoWidth,
+                height: videoHeight,
+                child: videoWidget,
+              ),
+            ),
+          );
+        case VideoAspectRatioMode.original:
+          return Center(
+            child: AspectRatio(
+              aspectRatio: 16 / 9,
+              child: videoWidget,
+            ),
+          );
+      }
     }
     return const ColoredBox(color: Colors.black);
   }
@@ -1725,6 +1867,64 @@ class _PlayerScreenState extends State<PlayerScreen>
               }
             },
             onDoubleTap: () {},
+            onScaleStart: (details) {
+              if (details.pointerCount == 2) {
+                _isPinching = true;
+              }
+            },
+            onScaleUpdate: (details) {
+              if (details.pointerCount == 2 && _isPinching) {
+                if (details.scale > 1.18 && _aspectRatioMode != VideoAspectRatioMode.fill) {
+                  _safeSetState(() {
+                    _aspectRatioMode = VideoAspectRatioMode.fill;
+                    _showAspectBadge = true;
+                  });
+                  _aspectBadgeTimer?.cancel();
+                  _aspectBadgeTimer = Timer(const Duration(milliseconds: 1500), () {
+                    if (mounted) _safeSetState(() => _showAspectBadge = false);
+                  });
+                  _isPinching = false;
+                } else if (details.scale < 0.82 && _aspectRatioMode != VideoAspectRatioMode.fit) {
+                  _safeSetState(() {
+                    _aspectRatioMode = VideoAspectRatioMode.fit;
+                    _showAspectBadge = true;
+                  });
+                  _aspectBadgeTimer?.cancel();
+                  _aspectBadgeTimer = Timer(const Duration(milliseconds: 1500), () {
+                    if (mounted) _safeSetState(() => _showAspectBadge = false);
+                  });
+                  _isPinching = false;
+                }
+              }
+            },
+            onScaleEnd: (details) {
+              _isPinching = false;
+            },
+            onVerticalDragUpdate: (details) {
+              final size = MediaQuery.of(context).size;
+              final isLeft = details.globalPosition.dx < size.width / 2;
+              final delta = -details.delta.dy / 250;
+              if (isLeft) {
+                _safeSetState(() {
+                  _brightness = (_brightness + delta).clamp(0.15, 1.0);
+                  _showBrightnessIndicator = true;
+                });
+                _brightnessTimer?.cancel();
+                _brightnessTimer = Timer(const Duration(milliseconds: 1500), () {
+                  if (mounted) _safeSetState(() => _showBrightnessIndicator = false);
+                });
+              } else {
+                _safeSetState(() {
+                  _volume = (_volume + delta).clamp(0.0, 1.0);
+                  _showVolumeIndicator = true;
+                });
+                _controller?.setVolume(_volume);
+                _volumeTimer?.cancel();
+                _volumeTimer = Timer(const Duration(milliseconds: 1500), () {
+                  if (mounted) _safeSetState(() => _showVolumeIndicator = false);
+                });
+              }
+            },
           ),
         ),
         if (_showControls && !_locked)
@@ -1803,6 +2003,183 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
+    Widget _buildBrightnessIndicator() {
+    return Positioned(
+      left: 28,
+      top: 0,
+      bottom: 0,
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 14),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.75),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: Colors.white12),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                _brightness > 0.6 ? Icons.brightness_7 : Icons.brightness_4,
+                color: Colors.white,
+                size: 20,
+              ),
+              const SizedBox(height: 10),
+              Container(
+                width: 6,
+                height: 80,
+                decoration: BoxDecoration(
+                  color: Colors.white24,
+                  borderRadius: BorderRadius.circular(3),
+                ),
+                alignment: Alignment.bottomCenter,
+                child: Container(
+                  width: 6,
+                  height: 80 * _brightness,
+                  decoration: BoxDecoration(
+                    color: _accent,
+                    borderRadius: BorderRadius.circular(3),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                '${(_brightness * 100).round()}%',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildVolumeIndicator() {
+    return Positioned(
+      right: 28,
+      top: 0,
+      bottom: 0,
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 14),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.75),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: Colors.white12),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                _volume == 0
+                    ? Icons.volume_off
+                    : (_volume > 0.5 ? Icons.volume_up : Icons.volume_down),
+                color: Colors.white,
+                size: 20,
+              ),
+              const SizedBox(height: 10),
+              Container(
+                width: 6,
+                height: 80,
+                decoration: BoxDecoration(
+                  color: Colors.white24,
+                  borderRadius: BorderRadius.circular(3),
+                ),
+                alignment: Alignment.bottomCenter,
+                child: Container(
+                  width: 6,
+                  height: 80 * _volume,
+                  decoration: BoxDecoration(
+                    color: _accent,
+                    borderRadius: BorderRadius.circular(3),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                '${(_volume * 100).round()}%',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAspectRatioBadge() {
+    return Center(
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+        decoration: BoxDecoration(
+          color: Colors.black.withValues(alpha: 0.8),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: Colors.white24),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.aspect_ratio, color: Colors.white, size: 18),
+            const SizedBox(width: 8),
+            Text(
+              _aspectRatioDescription(_aspectRatioMode),
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 14,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPortraitRotatePrompt() {
+    return Positioned(
+      top: 68,
+      left: 0,
+      right: 0,
+      child: Center(
+        child: InkWell(
+          onTap: () => unawaited(_toggleOrientation()),
+          borderRadius: BorderRadius.circular(24),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.82),
+              borderRadius: BorderRadius.circular(24),
+              border: Border.all(color: Colors.white24, width: 1),
+            ),
+            child: const Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.screen_rotation, color: Colors.white, size: 16),
+                SizedBox(width: 8),
+                Text(
+                  'Rotate to Landscape for Fullscreen',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildHud() {
     final title = widget.item.mediaType == 'tv'
         ? '${widget.item.title}  ·  S$_currentSeason:E$_currentEpisode'
@@ -1848,6 +2225,16 @@ class _PlayerScreenState extends State<PlayerScreen>
                         ),
                     ],
                   ),
+                ),
+                _hudIcon(
+                  icon: Icons.aspect_ratio,
+                  tooltip: 'Aspect ratio (${_aspectRatioLabel(_aspectRatioMode)})',
+                  onPressed: _toggleAspectRatio,
+                ),
+                _hudIcon(
+                  icon: Icons.screen_rotation,
+                  tooltip: _isLandscape ? 'Switch to portrait' : 'Switch to landscape',
+                  onPressed: () => unawaited(_toggleOrientation()),
                 ),
                 _hudIcon(
                   icon: Icons.subtitles_outlined,
@@ -1994,6 +2381,16 @@ class _PlayerScreenState extends State<PlayerScreen>
                   icon: _locked ? Icons.lock : Icons.lock_open,
                   label: 'Lock',
                   onPressed: _toggleLock,
+                ),
+                _bottomAction(
+                  icon: Icons.aspect_ratio,
+                  label: _aspectRatioLabel(_aspectRatioMode),
+                  onPressed: _toggleAspectRatio,
+                ),
+                _bottomAction(
+                  icon: Icons.screen_rotation,
+                  label: _isLandscape ? 'Portrait' : 'Landscape',
+                  onPressed: () => unawaited(_toggleOrientation()),
                 ),
                 if (widget.item.mediaType == 'tv' && !_isOffline)
                   _bottomAction(

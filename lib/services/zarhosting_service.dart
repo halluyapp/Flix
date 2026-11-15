@@ -279,6 +279,9 @@ class ZarhostingService {
     if (match.isSeries) {
       query['se'] = '$season';
       query['ep'] = '$episode';
+    } else {
+      query['se'] = '0';
+      query['ep'] = '0';
     }
 
     try {

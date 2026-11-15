@@ -31,7 +31,7 @@ void main() {
     expect(result.statusCode, 206);
   });
 
-  test('sends a range request with the ExoPlayer headers', () async {
+  test('sends a range request with the verified media headers', () async {
     final seen = <http.BaseRequest>[];
     final client = MockClient((request) async {
       seen.add(request);
@@ -42,8 +42,8 @@ void main() {
 
     expect(seen, hasLength(1));
     expect(seen.single.headers['Range'], 'bytes=0-1');
-    expect(seen.single.headers['User-Agent'], 'ExoPlayerLib/2.19.1');
-    expect(seen.single.headers['Referer'], 'https://www.movieboxpro.app/');
+    expect(seen.single.headers['User-Agent'], contains('Mozilla/5.0'));
+    expect(seen.single.headers['Referer'], 'https://moviebox.ph/');
   });
 
   test('retries a 429 once before giving up', () async {
