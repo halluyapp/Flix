@@ -267,7 +267,10 @@ class SubtitleService {
       final body = utf8
           .decode(response.bodyBytes.take(2048).toList(), allowMalformed: true)
           .toLowerCase();
-      if (body.contains('expir')) {
+      // A 401 means the signed link is no longer accepted: a fresh provider
+      // list can fix that. A 403 is a refusal a new link will not fix, unless
+      // the body says the link expired.
+      if (status == 401 || body.contains('expir')) {
         throw SubtitleException(
           SubtitleFailure.expired,
           'This subtitle link has expired. $refreshHint',
