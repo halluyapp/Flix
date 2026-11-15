@@ -309,18 +309,19 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (!_isCurrent(generation)) return;
 
     if (!started) {
-      // Try one alternate source before surfacing a fatal state.
-      final alternative = _sources.firstWhere(
-        (source) => source.url != first.url,
-        orElse: () => first,
-      );
-      if (alternative.url != first.url) {
-        _safeSetState(() => _selectedSource = alternative);
+      // A decoder failure is about the file, not the headers: walk the other
+      // qualities from the smallest up so a phone that cannot decode a 4K
+      // stream still plays this title.
+      for (final candidate in playbackCandidates(_sources)) {
+        if (candidate.url == first.url) continue;
+        if (!_isCurrent(generation)) return;
+        _safeSetState(() => _selectedSource = candidate);
         started = await _initializeController(
-          alternative,
+          candidate,
           generation,
           startAt: startAt,
         );
+        if (started) break;
       }
     }
 
@@ -343,8 +344,9 @@ class _PlayerScreenState extends State<PlayerScreen>
         _phase = _PlayerPhase.failure;
         _failure = const ProviderException(
           ProviderErrorType.unknown,
-          'Playback could not start with the built-in player.',
-          diagnostic: 'exoplayer initialization failed',
+          'This stream could not be opened. The provider refused the file or '
+          'this phone cannot decode it.',
+          diagnostic: 'exoplayer initialization failed on every source',
         );
       });
     }
@@ -511,6 +513,11 @@ class _PlayerScreenState extends State<PlayerScreen>
           await controller?.dispose();
         } catch (_) {}
         _controller = null;
+        final text = error.toString();
+        if (text.contains('429') || text.contains('too many requests')) {
+          await Future<void>.delayed(const Duration(milliseconds: 1400));
+        }
+        if (!_isCurrent(generation)) return false;
         if (!_shouldTryNextProfile(error, attempt, profiles.length)) break;
       }
     }

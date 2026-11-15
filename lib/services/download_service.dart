@@ -12,6 +12,7 @@ import '../models/offline_download.dart';
 import '../models/stream_source.dart';
 import 'diagnostics_service.dart';
 import 'download_engine.dart';
+import 'media_probe.dart';
 import 'download_validation.dart';
 import 'stream_resolver.dart';
 import 'subtitle_service.dart';
@@ -28,6 +29,27 @@ class DownloadConflictException implements Exception {
       : 'This quality is already queued.';
 }
 
+/// The provider's CDN refused every link for a title (rate limit, region or an
+/// expired signature). The message is shown to the viewer as-is.
+class MediaUnavailableException implements Exception {
+  final int statusCode;
+
+  const MediaUnavailableException(this.statusCode);
+
+  @override
+  String toString() {
+    if (statusCode == 429) {
+      return 'The provider is rate-limiting this title (HTTP 429). Wait a '
+          'minute and try again, or choose another quality.';
+    }
+    if (statusCode > 0) {
+      return 'The provider refused this file (HTTP $statusCode). Try another '
+          'quality.';
+    }
+    return 'The provider did not return a playable file for this title.';
+  }
+}
+
 /// Manages the offline library.
 ///
 /// Android's DownloadManager performs the transfer in the background and
@@ -35,9 +57,13 @@ class DownloadConflictException implements Exception {
 /// integrity verification, paired subtitle files and honest recovery states.
 /// It never reports a download as ready until the local file has been verified.
 class DownloadService extends ChangeNotifier {
-  DownloadService({StreamResolver? resolver, DownloadEngine? engine})
-      : _resolver = resolver ?? StreamResolver(),
-        _engine = engine ?? platformDownloadEngine();
+  DownloadService({
+    StreamResolver? resolver,
+    DownloadEngine? engine,
+    MediaProbe? probe,
+  })  : _resolver = resolver ?? StreamResolver(),
+        _engine = engine ?? platformDownloadEngine(),
+        _probe = probe ?? MediaProbe();
 
   static const String _queueKey = 'flix_offline_downloads_v2';
   static const String _wifiKey = 'flix_downloads_wifi_only';
@@ -45,6 +71,7 @@ class DownloadService extends ChangeNotifier {
 
   final StreamResolver _resolver;
   final DownloadEngine _engine;
+  final MediaProbe _probe;
   final List<OfflineDownload> _downloads = [];
   SharedPreferences? _preferences;
   Timer? _pollTimer;
@@ -212,11 +239,60 @@ class DownloadService extends ChangeNotifier {
     final effectiveSeason = isEpisode ? season : 0;
     final effectiveEpisode = isEpisode ? episode : 0;
 
+    // Never queue a link the provider is refusing. A signed URL can be
+    // rate-limited (HTTP 429), region-blocked or already expired; checking the
+    // first bytes first lets Flix fall back to another quality, or say what
+    // happened instead of leaving a dead download in the library.
+    var chosen = source;
+    var effective = resolved;
+    var probe = await _probe.check(chosen);
+    if (probe.blocked) {
+      for (final candidate in resolved.downloadSources) {
+        if (candidate.url == chosen.url) continue;
+        final alternative = await _probe.check(candidate);
+        if (!alternative.blocked) {
+          chosen = candidate;
+          probe = alternative;
+          break;
+        }
+      }
+    }
+    if (probe.blocked) {
+      // Signed links expire and the CDN rate-limits bursts: give it a moment,
+      // then ask the provider for a new link before failing this download.
+      await Future<void>.delayed(const Duration(milliseconds: 1500));
+      _resolver.invalidate(
+        item: item,
+        season: effectiveSeason,
+        episode: effectiveEpisode,
+      );
+      final fresh = await _resolver.resolve(
+        item: item,
+        season: effectiveSeason,
+        episode: effectiveEpisode,
+        forceRefresh: true,
+      );
+      if (fresh.isSuccess) {
+        effective = fresh.stream!;
+        for (final candidate in effective.downloadSources) {
+          final again = await _probe.check(candidate);
+          if (!again.blocked) {
+            chosen = candidate;
+            probe = again;
+            break;
+          }
+        }
+      }
+    }
+    if (probe.blocked) {
+      throw MediaUnavailableException(probe.statusCode);
+    }
+
     final conflict = findDownload(
       item,
       season: effectiveSeason,
       episode: effectiveEpisode,
-      qualityValue: source.qualityValue,
+      qualityValue: chosen.qualityValue,
     );
     if (conflict != null) throw DownloadConflictException(conflict);
 
@@ -232,12 +308,12 @@ class DownloadService extends ChangeNotifier {
       isEpisode: isEpisode,
       season: effectiveSeason,
       episode: effectiveEpisode,
-      qualityValue: source.qualityValue,
+      qualityValue: chosen.qualityValue,
       stamp: stamp,
     );
     final videoPath = '$directory${Platform.pathSeparator}$fileName';
 
-    final selectedCaptions = resolved.captions
+    final selectedCaptions = effective.captions
         .where((caption) => subtitleLanguages.contains(caption.language))
         .toList(growable: false);
     final subtitleResult = await _saveSubtitles(
@@ -260,15 +336,15 @@ class DownloadService extends ChangeNotifier {
       await _engine.requestNotificationPermission();
       final result = await _engine.enqueue(
         DownloadEnqueueRequest(
-          url: source.url,
+          url: chosen.url,
           fileName: fileName,
           title: isEpisode
               ? '${item.title} · S$effectiveSeason:E$effectiveEpisode'
               : item.title,
-          description: 'Saved in Flix · ${source.resolution}',
+          description: 'Saved in Flix · ${chosen.resolution}',
           headers: <String, String>{
             ...ApiConstants.zarhostingMediaHeaders,
-            ...source.headers,
+            ...chosen.headers,
           },
           wifiOnly: wifiOnly ?? _wifiOnly,
         ),
@@ -286,19 +362,19 @@ class DownloadService extends ChangeNotifier {
         season: effectiveSeason,
         episode: effectiveEpisode,
         episodeTitle: episodeTitle,
-        resolution: source.resolution,
-        qualityValue: source.qualityValue,
+        resolution: chosen.resolution,
+        qualityValue: chosen.qualityValue,
         filePath: returnedPath,
         subtitles: subtitleResult.saved,
         subtitleLanguages: subtitleLanguages.toList()..sort(),
         status: 'pending',
         downloadedBytes: 0,
-        totalBytes: source.sizeBytes,
-        expectedBytes: source.sizeBytes,
+        totalBytes: chosen.sizeBytes,
+        expectedBytes: chosen.sizeBytes,
         createdAt: DateTime.now(),
         profileIndex: profileIndex,
         verified: false,
-        format: source.format,
+        format: chosen.format,
       );
 
       // A failed record for the same media + quality is superseded, never a
@@ -767,6 +843,7 @@ class DownloadService extends ChangeNotifier {
   void dispose() {
     _pollTimer?.cancel();
     _pollTimer = null;
+    _probe.dispose();
     super.dispose();
   }
 }

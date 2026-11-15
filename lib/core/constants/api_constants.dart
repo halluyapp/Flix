@@ -30,7 +30,6 @@ class ApiConstants {
     'Referer': 'https://www.movieboxpro.app/',
     'Origin': 'https://www.movieboxpro.app',
     'Accept': '*/*',
-    'Accept-Encoding': 'identity',
   };
 
   // Fallback profiles if CDN rejects primary profile

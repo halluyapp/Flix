@@ -11,6 +11,7 @@ import 'package:flix/models/provider_match.dart';
 import 'package:flix/models/stream_source.dart';
 import 'package:flix/services/download_engine.dart';
 import 'package:flix/services/download_service.dart';
+import 'package:flix/services/media_probe.dart';
 import 'package:flix/services/stream_resolver.dart';
 import 'package:flix/services/zarhosting_api_client.dart';
 import 'package:flix/services/zarhosting_service.dart';
@@ -152,7 +153,15 @@ Future<(DownloadService, _FakeEngine, Directory)> _setup() async {
       ),
     ),
   );
-  final service = DownloadService(resolver: resolver, engine: engine);
+  final service = DownloadService(
+    resolver: resolver,
+    engine: engine,
+    // The probe must never touch the network in tests.
+    probe: MediaProbe(
+      client: MockClient((_) async => http.Response('', 206)),
+      retryDelay: Duration.zero,
+    ),
+  );
   return (service, engine, directory);
 }
 
@@ -371,6 +380,48 @@ void main() {
     expect(job.isEpisode, isTrue);
     expect(job.season, 5);
     expect(job.episode, 1);
+  });
+
+  test('refuses to queue a link the provider is blocking', () async {
+    final (service, engine, directory) = await _setup();
+    addTearDown(() async {
+      service.dispose();
+      if (directory.existsSync()) await directory.delete(recursive: true);
+    });
+    final blocked = DownloadService(
+      resolver: StreamResolver(
+        service: ZarhostingService(
+          client: ZarhostingApiClient(
+            client: MockClient((_) async => http.Response('{}', 500)),
+            baseUrl: 'https://provider.example.com',
+            maxAttempts: 1,
+            sleep: (_) async {},
+          ),
+        ),
+      ),
+      engine: engine,
+      probe: MediaProbe(
+        client: MockClient((_) async => http.Response('', 429)),
+        retryDelay: Duration.zero,
+      ),
+    );
+    addTearDown(blocked.dispose);
+
+    final source = _mp4();
+    await expectLater(
+      blocked.startDownload(
+        item: _movie(),
+        season: 0,
+        episode: 0,
+        episodeTitle: '',
+        resolved: _resolved(source),
+        source: source,
+        subtitleLanguages: const {},
+      ),
+      throwsA(isA<MediaUnavailableException>()),
+    );
+    expect(engine.requests, isEmpty);
+    expect(blocked.downloads, isEmpty);
   });
 
   test('recovery marks a download failed when its job disappears', () async {
