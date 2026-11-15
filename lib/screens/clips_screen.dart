@@ -7,6 +7,7 @@ import '../services/clips_service.dart';
 import '../services/user_state_service.dart';
 import '../models/provider_match.dart';
 import 'player_screen.dart';
+import '../services/device_profile.dart';
 
 class ClipsScreen extends StatefulWidget {
   const ClipsScreen({super.key});
@@ -214,6 +215,7 @@ class _ClipsScreenState extends State<ClipsScreen> {
         if (clip.posterUrl.isNotEmpty)
           CachedNetworkImage(
             imageUrl: clip.posterUrl,
+            memCacheWidth: DeviceProfile.instance.backdropDecodeWidth,
             fit: BoxFit.cover,
             placeholder: (_, __) => _buildPosterFallback(),
             errorWidget: (_, __, ___) => _buildPosterFallback(),

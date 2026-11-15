@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 
 import 'core/theme/flix_theme.dart';
 import 'screens/splash_screen.dart';
+import 'services/device_profile.dart';
 import 'services/diagnostics_service.dart';
 import 'services/download_service.dart';
 import 'services/user_state_service.dart';
@@ -16,6 +17,13 @@ void main() async {
   // Captures framework and uncaught asynchronous errors into a small, local,
   // sanitized diagnostic log. Nothing is uploaded automatically.
   DiagnosticsService.instance.install();
+
+  // A 2 GB phone cannot afford Flutter's default 100 MB bitmap cache on top of
+  // ExoPlayer's native buffers, so cap it to the device's class.
+  final profile = DeviceProfile.instance;
+  final imageCache = PaintingBinding.instance.imageCache;
+  imageCache.maximumSize = profile.imageCacheEntries;
+  imageCache.maximumSizeBytes = profile.imageCacheBytes;
 
   try {
     await SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);

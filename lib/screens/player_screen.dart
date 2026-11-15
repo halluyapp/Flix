@@ -20,6 +20,7 @@ import '../models/stream_source.dart';
 import '../models/tv_season.dart';
 import '../services/diagnostics_service.dart';
 import '../services/episode_navigator.dart';
+import '../services/source_preference.dart';
 import '../services/stream_resolver.dart';
 import '../services/subtitle_service.dart';
 import '../services/tmdb_service.dart';
@@ -355,7 +356,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (sources.isEmpty) return;
     final selected = sources.firstWhere(
       (source) => source.qualityValue == previousQuality,
-      orElse: () => sources.first,
+      orElse: () => preferredSource(sources) ?? sources.first,
     );
     _safeSetState(() {
       _sources = sources;

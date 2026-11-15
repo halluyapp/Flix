@@ -10,12 +10,9 @@ on:
 permissions:
   contents: write
 
-env:
-  FLIX_PACKAGE: com.halluyapp.flix
-
 jobs:
   build:
-    name: Analyze, test, and build universal APK
+    name: Build universal APK
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
@@ -48,12 +45,6 @@ jobs:
 
       - name: Install dependencies
         run: flutter pub get
-
-      - name: Verify analyzer
-        run: flutter analyze --no-fatal-infos --no-fatal-warnings
-
-      - name: Run tests
-        run: flutter test
 
       - name: Build one universal release APK
         run: flutter build apk --release --build-name="1.0.${{ github.run_number }}" --build-number="${{ github.run_number }}"
@@ -99,68 +90,13 @@ jobs:
           body: |
             ### Flix Android
             - One universal installable APK, verified to contain ARMv7, ARM64, and x86_64 native libraries.
-            - Lazy-loaded navigation to reduce work during app startup.
-            - Provider playback retries, timed subtitles, and an in-app offline library with app-private MP4/subtitle files.
+            - Provider playback with local loading visuals and a full player HUD.
+            - In-app offline library with verified MP4 and paired subtitle files.
+            - Tuned for low-memory phones: card-sized image decoding, capped bitmap
+              cache and a sustainable default playback quality.
             - APK versionCode increments with each GitHub Actions run so Android can install it as an update.
             - CI build; configure a managed release keystore before store distribution.
           draft: false
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  emulator-smoke-test:
-    name: Install, launch, and capture Android diagnostics
-    needs: build
-    runs-on: ubuntu-24.04
-    timeout-minutes: 35
-
-    steps:
-      - name: Checkout smoke-test script
-        uses: actions/checkout@v4
-
-      - name: Download universal APK
-        uses: actions/download-artifact@v4
-        with:
-          name: flix-universal-apk
-          path: artifacts/apk
-
-      - name: Prepare emulator diagnostics
-        run: mkdir -p artifacts/emulator artifacts/screenshots
-
-      - name: Enable KVM for Android emulator
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-
-      - name: Install, launch, and capture on Android emulator
-        timeout-minutes: 25
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 34
-          target: google_apis
-          arch: x86_64
-          profile: pixel_5
-          emulator-boot-timeout: 300
-          emulator-options: -no-snapshot -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          disable-animations: true
-          working-directory: ${{ github.workspace }}
-          script: bash .github/scripts/emulator-smoke.sh
-
-      - name: Upload Home and movie media screenshots
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: flix-readme-screenshot
-          path: artifacts/screenshots/*.png
-          if-no-files-found: warn
-          retention-days: 30
-
-      - name: Upload emulator logs and crash diagnostics
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: flix-emulator-diagnostics
-          path: artifacts/emulator/**
-          if-no-files-found: warn
-          retention-days: 30

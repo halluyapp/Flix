@@ -5,6 +5,7 @@ import '../models/media_item.dart';
 import '../services/user_state_service.dart';
 import '../screens/detail_screen.dart';
 import '../screens/player_screen.dart';
+import '../services/device_profile.dart';
 
 class HeroBillboard extends StatelessWidget {
   final MediaItem? item;
@@ -27,6 +28,7 @@ class HeroBillboard extends StatelessWidget {
       children: [
         CachedNetworkImage(
           imageUrl: item!.backdropUrl,
+          memCacheWidth: DeviceProfile.instance.backdropDecodeWidth,
           height: 480,
           width: double.infinity,
           fit: BoxFit.cover,

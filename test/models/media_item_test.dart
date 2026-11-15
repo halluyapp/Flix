@@ -25,7 +25,8 @@ void main() {
       expect(item.voteAverage, 8.4);
       expect(item.matchScore, 84);
       expect(item.posterUrl, contains('https://image.tmdb.org/t/p/w500/poster.jpg'));
-      expect(item.backdropUrl, contains('https://image.tmdb.org/t/p/original/backdrop.jpg'));
+      // w780 keeps a full-width backdrop affordable to decode on a 2 GB phone.
+      expect(item.backdropUrl, contains('https://image.tmdb.org/t/p/w780/backdrop.jpg'));
     });
 
     test('handles fallback when fields are missing or null', () {

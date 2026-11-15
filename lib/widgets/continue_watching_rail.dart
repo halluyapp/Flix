@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import '../services/user_state_service.dart';
 import '../screens/player_screen.dart';
+import '../services/device_profile.dart';
 
 class ContinueWatchingRail extends StatelessWidget {
   final List<WatchProgress> items;
@@ -63,6 +64,7 @@ class ContinueWatchingRail extends StatelessWidget {
                             borderRadius: const BorderRadius.vertical(top: Radius.circular(6)),
                             child: CachedNetworkImage(
                               imageUrl: progress.item.posterUrl,
+                              memCacheWidth: DeviceProfile.instance.posterDecodeWidth,
                               width: 120,
                               height: 140,
                               fit: BoxFit.cover,

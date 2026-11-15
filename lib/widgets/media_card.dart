@@ -3,6 +3,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:shimmer/shimmer.dart';
 import '../models/media_item.dart';
 import '../screens/detail_screen.dart';
+import '../services/device_profile.dart';
 
 class MediaCard extends StatelessWidget {
   final MediaItem item;
@@ -28,6 +29,7 @@ class MediaCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(6),
         child: CachedNetworkImage(
           imageUrl: item.posterUrl,
+          memCacheWidth: DeviceProfile.instance.posterDecodeWidth,
           width: width,
           height: height,
           fit: BoxFit.cover,

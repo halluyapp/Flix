@@ -4,6 +4,7 @@ import 'package:share_plus/share_plus.dart';
 import '../models/media_item.dart';
 import '../services/tmdb_service.dart';
 import 'detail_screen.dart';
+import '../services/device_profile.dart';
 
 class NewAndHotScreen extends StatefulWidget {
   const NewAndHotScreen({super.key});
@@ -130,6 +131,7 @@ class _NewAndHotScreenState extends State<NewAndHotScreen> with SingleTickerProv
                   children: [
                     CachedNetworkImage(
                       imageUrl: item.backdropUrl,
+                      memCacheWidth: DeviceProfile.instance.backdropDecodeWidth,
                       height: 200,
                       width: double.infinity,
                       fit: BoxFit.cover,

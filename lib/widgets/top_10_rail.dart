@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../models/media_item.dart';
 import '../screens/detail_screen.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import '../services/device_profile.dart';
 
 class Top10Rail extends StatelessWidget {
   final String title;
@@ -81,6 +82,7 @@ class Top10Rail extends StatelessWidget {
                           borderRadius: BorderRadius.circular(6),
                           child: CachedNetworkImage(
                             imageUrl: item.posterUrl,
+                            memCacheWidth: DeviceProfile.instance.posterDecodeWidth,
                             width: 100,
                             fit: BoxFit.cover,
                           ),

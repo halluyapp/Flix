@@ -12,6 +12,7 @@ import '../services/user_state_service.dart';
 import '../widgets/content_rail.dart';
 import 'download_options_sheet.dart';
 import 'player_screen.dart';
+import '../services/device_profile.dart';
 
 const Color _accent = Color(0xFFE50914);
 
@@ -206,6 +207,7 @@ class _DetailScreenState extends State<DetailScreen> {
               children: [
                 CachedNetworkImage(
                   imageUrl: widget.item.backdropUrl,
+                  memCacheWidth: DeviceProfile.instance.backdropDecodeWidth,
                   height: 220,
                   width: double.infinity,
                   fit: BoxFit.cover,
@@ -505,6 +507,7 @@ class _DetailScreenState extends State<DetailScreen> {
                         borderRadius: BorderRadius.circular(4),
                         child: CachedNetworkImage(
                           imageUrl: episode.thumbnail,
+                          memCacheWidth: DeviceProfile.instance.veryLowMemory ? 200 : 260,
                           width: 100,
                           height: 60,
                           fit: BoxFit.cover,

@@ -8,6 +8,7 @@ import '../models/offline_download.dart';
 import '../services/download_engine.dart';
 import '../services/download_service.dart';
 import 'player_screen.dart';
+import '../services/device_profile.dart';
 
 const Color _accent = Color(0xFFE50914);
 
@@ -430,6 +431,7 @@ class _DownloadCard extends StatelessWidget {
             borderRadius: BorderRadius.circular(6),
             child: CachedNetworkImage(
               imageUrl: job.item.posterUrl,
+              memCacheWidth: DeviceProfile.instance.posterDecodeWidth,
               width: 76,
               height: 108,
               fit: BoxFit.cover,

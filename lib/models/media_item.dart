@@ -75,7 +75,7 @@ class MediaItem {
   String get backdropUrl =>
       backdropUrlOverride ??
       (backdropPath != null
-          ? 'https://image.tmdb.org/t/p/original$backdropPath'
+          ? 'https://image.tmdb.org/t/p/w780$backdropPath'
           : posterUrl);
 
   Map<String, dynamic> toJson() => {
