@@ -11,6 +11,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import '../core/constants/api_constants.dart';
 import '../core/provider/provider_failures.dart';
 import '../core/provider/provider_messages.dart';
+import '../models/caption_load.dart';
 import '../models/caption_track.dart';
 import '../models/episode.dart';
 import '../models/media_item.dart';
@@ -128,6 +129,11 @@ class _PlayerScreenState extends State<PlayerScreen>
   List<StreamSource> _sources = const [];
   StreamSource? _selectedSource;
   List<CaptionTrack> _captions = const [];
+  CaptionLoad? _captionLoad;
+
+  /// Set once the viewer picks a subtitle or "Off", so a late subtitle list
+  /// never silently turns subtitles back on.
+  bool _userChoseSubtitles = false;
   CaptionTrack? _selectedCaption;
   List<SubtitleCue> _subtitleCues = const [];
   List<OfflineSubtitle> _offlineSubtitles = const [];
@@ -459,6 +465,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _safeSetState(() {
       _sources = sources;
       _selectedSource = selected;
+      _captionLoad = stream.captionLoad;
       _captions = stream.captions;
       _selectedCaption = _pickCaption(stream.captions);
       _subtitleCues = const [];
@@ -467,6 +474,10 @@ class _PlayerScreenState extends State<PlayerScreen>
     final caption = _selectedCaption;
     if (caption != null) {
       unawaited(_loadOnlineSubtitle(caption, generation));
+    }
+    if (stream.captionLoad.isPending) {
+      // The list was still loading when the video started; fill it in later.
+      unawaited(_awaitCaptions(generation));
     }
   }
 
@@ -866,15 +877,48 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   // -------------------------------------------------------------- subtitles
 
-  Future<void> _loadOnlineSubtitle(CaptionTrack track, int generation) async {
+  Future<void> _loadOnlineSubtitle(
+    CaptionTrack track,
+    int generation, {
+    bool refreshed = false,
+  }) async {
     try {
-      final cues = await SubtitleService.fetch(track);
+      final file = await SubtitleService.fetchValidated(track);
       if (!_isCurrent(generation) || _selectedCaption?.id != track.id) return;
+      final cues = SubtitleService.parseText(file.text);
       _subtitleCues = cues;
       _subtitleText.value = SubtitleService.activeText(
         cues,
         _position.value,
       );
+    } on SubtitleException catch (error) {
+      if (!_isCurrent(generation) || _selectedCaption?.id != track.id) return;
+      DiagnosticsService.instance.record(
+        scope: 'player',
+        operation: 'load_online_subtitle',
+        error: error,
+        data: {'kind': error.failure.name, 'language': track.language},
+      );
+      if (error.needsFreshLink && !refreshed) {
+        // A signed link can expire while the video plays: ask the provider
+        // for a fresh subtitle list once and retry the same language.
+        final load = await _resolver.refreshCaptions(
+          item: widget.item,
+          providerMatch: widget.providerMatch ?? _chosenMatch,
+          season: _effectiveSeason,
+          episode: _effectiveEpisode,
+          forceRefresh: true,
+        );
+        if (!_isCurrent(generation) || _selectedCaption?.id != track.id) return;
+        final replacement = load.isLoaded ? _findTrack(load.tracks, track) : null;
+        if (replacement != null) {
+          _applyCaptionLoad(load, generation);
+          _safeSetState(() => _selectedCaption = replacement);
+          await _loadOnlineSubtitle(replacement, generation, refreshed: true);
+          return;
+        }
+      }
+      if (_isCurrent(generation)) _showMessage(error.message);
     } catch (error) {
       DiagnosticsService.instance.record(
         scope: 'player',
@@ -887,6 +931,88 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
+  /// Completes a subtitle lookup that outlived the resolve budget, so the list
+  /// fills in without restarting playback.
+  Future<void> _awaitCaptions(int generation) async {
+    final load = await _resolver.refreshCaptions(
+      item: widget.item,
+      providerMatch: widget.providerMatch ?? _chosenMatch,
+      season: _effectiveSeason,
+      episode: _effectiveEpisode,
+    );
+    if (!_isCurrent(generation)) return;
+    _applyCaptionLoad(load, generation);
+  }
+
+  /// Re-runs subtitle discovery without touching the video: playback position
+  /// and the current stream stay exactly as they are.
+  Future<void> _retryCaptions() async {
+    final generation = _generation;
+    _safeSetState(() => _captionLoad = CaptionLoad.pending());
+    final load = await _resolver.refreshCaptions(
+      item: widget.item,
+      providerMatch: widget.providerMatch ?? _chosenMatch,
+      season: _effectiveSeason,
+      episode: _effectiveEpisode,
+      forceRefresh: true,
+    );
+    if (!_isCurrent(generation)) return;
+    _applyCaptionLoad(load, generation);
+  }
+
+  /// Stores a discovered list for the current episode. Auto-selects a
+  /// language only when the viewer has not made a subtitle choice yet.
+  void _applyCaptionLoad(CaptionLoad load, int generation) {
+    if (!_isCurrent(generation)) return;
+    final previous = _selectedCaption;
+    final replacement = previous == null ? null : _findTrack(load.tracks, previous);
+    final autoPick = previous == null && !_userChoseSubtitles && !_isOffline
+        ? _pickCaption(load.tracks)
+        : null;
+    _safeSetState(() {
+      _captionLoad = load;
+      _captions = load.tracks;
+      if (replacement != null) _selectedCaption = replacement;
+      if (autoPick != null) _selectedCaption = autoPick;
+    });
+    if (autoPick != null) {
+      unawaited(_loadOnlineSubtitle(autoPick, generation));
+    }
+  }
+
+  /// Same subtitle after a list refresh: matched by id first, then by
+  /// language and URL identity, since signed links change between requests.
+  CaptionTrack? _findTrack(List<CaptionTrack> tracks, CaptionTrack track) {
+    for (final candidate in tracks) {
+      if (candidate.id == track.id && candidate.language == track.language) {
+        return candidate;
+      }
+    }
+    for (final candidate in tracks) {
+      if (candidate.identityKey == track.identityKey) return candidate;
+    }
+    return null;
+  }
+
+  int get _effectiveSeason =>
+      widget.item.mediaType == 'tv' ? _currentSeason : 0;
+
+  int get _effectiveEpisode =>
+      widget.item.mediaType == 'tv' ? _currentEpisode : 0;
+
+  /// Status line for the subtitle sheet while the list is not usable.
+  String? _captionStatusText() {
+    final load = _captionLoad;
+    if (load == null) return 'Loading subtitles…';
+    if (load.isLoaded) return null;
+    return load.userMessage;
+  }
+
+  bool _captionCanRetry() {
+    final load = _captionLoad;
+    return load != null && !load.isLoaded && !load.isPending;
+  }
+
   Future<void> _loadOfflineSubtitle(OfflineSubtitle subtitle) async {
     try {
       if (!await File(subtitle.path).exists()) {
@@ -894,8 +1020,12 @@ class _PlayerScreenState extends State<PlayerScreen>
         return;
       }
       final text = await File(subtitle.path).readAsString();
-      final cues = SubtitleService.parse(text);
+      final cues = SubtitleService.parseText(text);
       if (!mounted || _disposed) return;
+      if (cues.isEmpty) {
+        _showMessage('This saved subtitle has no readable captions.');
+        return;
+      }
       setState(() {
         _selectedOfflineSubtitle = subtitle;
         _selectedCaption = null;
@@ -913,6 +1043,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Future<void> _selectOnlineSubtitle(CaptionTrack? track) async {
+    _userChoseSubtitles = true;
     setState(() {
       _selectedCaption = track;
       _subtitleCues = const [];
@@ -928,6 +1059,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Future<void> _selectOfflineSubtitle(OfflineSubtitle? subtitle) async {
+    _userChoseSubtitles = true;
     if (subtitle == null) {
       setState(() {
         _selectedOfflineSubtitle = null;
@@ -1044,6 +1176,9 @@ class _PlayerScreenState extends State<PlayerScreen>
       setState(() {
         _currentSeason = next.season;
         _currentEpisode = next.episode;
+        _captionLoad = null;
+        _captions = const [];
+        _userChoseSubtitles = false;
         _selectedCaption = null;
         _selectedOfflineSubtitle = null;
         _subtitleCues = const [];
@@ -1065,6 +1200,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     setState(() {
       _currentSeason = season;
       _currentEpisode = episode;
+      _captionLoad = null;
+      _captions = const [];
+      _userChoseSubtitles = false;
       _selectedCaption = null;
       _subtitleCues = const [];
       _subtitleText.value = '';
@@ -1288,14 +1426,32 @@ class _PlayerScreenState extends State<PlayerScreen>
                         },
                       ),
                       if (tracks.isEmpty)
-                        const ListTile(
+                        ListTile(
                           title: Text(
-                            'No subtitles are available from the provider.',
-                            style: TextStyle(
+                            offline
+                                ? 'No subtitles were saved with this download.'
+                                : (_captionStatusText() ??
+                                    'No subtitles are available.'),
+                            style: const TextStyle(
                               color: Colors.white54,
                               fontSize: 13,
                             ),
                           ),
+                        ),
+                      if (!offline && _captionCanRetry())
+                        ListTile(
+                          leading: const Icon(
+                            Icons.refresh,
+                            color: Colors.white70,
+                          ),
+                          title: const Text(
+                            'Retry subtitles',
+                            style: TextStyle(color: Colors.white),
+                          ),
+                          onTap: () {
+                            Navigator.pop(sheetContext);
+                            unawaited(_retryCaptions());
+                          },
                         ),
                       if (offline)
                         for (final subtitle in _offlineSubtitles)

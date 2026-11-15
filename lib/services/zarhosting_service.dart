@@ -1,9 +1,10 @@
 import '../core/constants/api_constants.dart';
 import '../core/provider/provider_failures.dart';
-import '../models/caption_track.dart';
+import '../models/caption_load.dart';
 import '../models/provider_clip.dart';
 import '../models/provider_match.dart';
 import '../models/stream_source.dart';
+import 'caption_adapter.dart';
 import 'provider_matcher.dart';
 import 'provider_payload.dart';
 import 'zarhosting_api_client.dart';
@@ -265,51 +266,47 @@ class ZarhostingService {
     return a.format.compareTo(b.format);
   }
 
-  /// Caption discovery is best-effort: a caption failure must never stop
-  /// video playback. Returns an empty list when the provider has none.
-  Future<List<CaptionTrack>> fetchCaptions({
+  /// Requests the subtitle list for one exact movie or episode.
+  ///
+  /// Contract (unchanged from the verified stream contract): movies send
+  /// `se=0&ep=0`; episodes send the selected `se`/`ep` with the provider's
+  /// `detail_path`. Failures are thrown as typed [ProviderException]s so the
+  /// caller can tell "no subtitles" from "provider unavailable". Playback
+  /// never depends on this call; [StreamResolver] decides how to surface it.
+  Future<CaptionLoad> fetchCaptionLoad({
     required ProviderMatch match,
     int season = 0,
     int episode = 0,
+    Duration timeout = const Duration(seconds: 10),
   }) async {
-    if (!match.hasDistinctIdentifiers) return const [];
-    if (match.isSeries && (season < 1 || episode < 1)) return const [];
-
-    final query = <String, String>{'detail_path': match.detailPath};
-    if (match.isSeries) {
-      query['se'] = '$season';
-      query['ep'] = '$episode';
-    } else {
-      query['se'] = '0';
-      query['ep'] = '0';
-    }
-
-    try {
-      final decoded = await _client.getJson(
-        '/stream/${Uri.encodeComponent(match.subjectId)}/captions',
-        query: query,
-        kind: ProviderRequestKind.captions,
-        timeout: const Duration(seconds: 12),
+    if (!match.hasDistinctIdentifiers) {
+      throw const ProviderException(
+        ProviderErrorType.missingProviderIdentifier,
+        'The provider match is missing its subject ID or detail path.',
       );
-      final body = ProviderPayload.bodyOf(decoded);
-      final tracks = <CaptionTrack>[];
-      final seenLanguages = <String>{};
-      for (final raw in ProviderPayload.listOf(
-        body['captions'] ?? body['subtitles'],
-      )) {
-        if (raw is! Map) continue;
-        final track = CaptionTrack.fromJson(Map<String, dynamic>.from(raw));
-        if (!track.isSecure) continue;
-        if (!seenLanguages.add(track.language)) continue;
-        tracks.add(track);
-      }
-      return tracks;
-    } on ProviderException catch (error) {
-      if (error.type == ProviderErrorType.networkUnavailable) rethrow;
-      return const [];
-    } catch (_) {
-      return const [];
     }
+    if (match.isSeries && (season < 1 || episode < 1)) {
+      throw const ProviderException(
+        ProviderErrorType.missingProviderIdentifier,
+        'A TV episode needs both a season and an episode number.',
+      );
+    }
+
+    final query = <String, String>{
+      'detail_path': match.detailPath,
+      'se': match.isSeries ? '$season' : '0',
+      'ep': match.isSeries ? '$episode' : '0',
+    };
+
+    final decoded = await _client.getJson(
+      '/stream/${Uri.encodeComponent(match.subjectId)}/captions',
+      query: query,
+      kind: ProviderRequestKind.captions,
+      timeout: timeout,
+      // Subtitles are secondary: one retry at most, never a long stall.
+      maxAttempts: 2,
+    );
+    return CaptionResponseAdapter.parse(decoded);
   }
 
   /// Discovery rail for the Clips tab. Only provider records that explicitly

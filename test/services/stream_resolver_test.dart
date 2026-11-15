@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 import 'package:flix/core/provider/provider_failures.dart';
+import 'package:flix/models/caption_load.dart';
 import 'package:flix/models/media_item.dart';
 import 'package:flix/models/provider_match.dart';
 import 'package:flix/services/stream_resolver.dart';
@@ -244,6 +245,41 @@ void main() {
       final resolution = await harness.resolver.resolve(item: _movie());
       expect(resolution.isSuccess, isTrue);
       expect(resolution.stream!.captions, isEmpty);
+      // A failed lookup is reported as failed, never as "no subtitles".
+      expect(
+        resolution.stream!.captionLoad.status,
+        isNot(CaptionLoadStatus.empty),
+      );
+      expect(resolution.stream!.captionLoad.isLoaded, isFalse);
+    });
+
+    test('an explicit empty caption list is reported as empty', () async {
+      final harness = _Harness(captions: '{"captions":[]}');
+      final resolution = await harness.resolver.resolve(item: _movie());
+      expect(resolution.isSuccess, isTrue);
+      expect(resolution.stream!.captionLoad.status, CaptionLoadStatus.empty);
+    });
+
+    test('an unreadable caption payload is unsupported, not empty', () async {
+      final harness = _Harness(captions: '{"captions":[{"language":"en"}]}');
+      final resolution = await harness.resolver.resolve(item: _movie());
+      expect(resolution.isSuccess, isTrue);
+      expect(
+        resolution.stream!.captionLoad.status,
+        CaptionLoadStatus.unsupported,
+      );
+    });
+
+    test('episode captions are requested with the episode se/ep values',
+        () async {
+      final harness = _Harness(
+        search: _fixture('provider_search_tv.json'),
+        stream: _fixture('provider_stream_episode.json'),
+      );
+      await harness.resolver.resolve(item: _show(), season: 5, episode: 1);
+      final captionRequest = harness.last('/captions');
+      expect(captionRequest.queryParameters['se'], '5');
+      expect(captionRequest.queryParameters['ep'], '1');
     });
 
     test('a stream outage is reported as providerUnavailable', () async {

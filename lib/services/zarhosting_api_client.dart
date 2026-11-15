@@ -50,11 +50,13 @@ class ZarhostingApiClient {
     Map<String, String>? query,
     Duration? timeout,
     ProviderRequestKind kind = ProviderRequestKind.search,
+    int? maxAttempts,
   }) async {
     final uri = buildUri(path, query);
+    final limit = maxAttempts ?? this.maxAttempts;
     ProviderException? lastFailure;
 
-    for (var attempt = 0; attempt < maxAttempts; attempt++) {
+    for (var attempt = 0; attempt < limit; attempt++) {
       try {
         final response = await _client
             .get(uri, headers: ApiConstants.zarhostingApiHeaders)
@@ -66,7 +68,7 @@ class ZarhostingApiClient {
 
         final failure =
             _mapStatus(response.statusCode, _bodyText(response), kind);
-        if (!failure.isRetryable || attempt == maxAttempts - 1) {
+        if (!failure.isRetryable || attempt == limit - 1) {
           throw failure;
         }
         lastFailure = failure;
@@ -78,7 +80,7 @@ class ZarhostingApiClient {
           'The streaming service did not respond in time.',
           diagnostic: 'timeout after ${(timeout ?? defaultTimeout).inSeconds}s',
         );
-        if (attempt == maxAttempts - 1) throw failure;
+        if (attempt == limit - 1) throw failure;
         lastFailure = failure;
       } on SocketException catch (error) {
         final failure = ProviderException(
@@ -86,7 +88,7 @@ class ZarhostingApiClient {
           'The device could not reach the streaming service.',
           diagnostic: error.osError?.message ?? 'socket error',
         );
-        if (attempt == maxAttempts - 1) throw failure;
+        if (attempt == limit - 1) throw failure;
         lastFailure = failure;
       } on HandshakeException {
         throw const ProviderException(
@@ -100,7 +102,7 @@ class ZarhostingApiClient {
           'The connection to the streaming service was interrupted.',
           diagnostic: error.message,
         );
-        if (attempt == maxAttempts - 1) throw failure;
+        if (attempt == limit - 1) throw failure;
         lastFailure = failure;
       } on FormatException catch (error) {
         throw ProviderException(
@@ -110,7 +112,7 @@ class ZarhostingApiClient {
         );
       }
 
-      if (attempt < maxAttempts - 1) {
+      if (attempt < limit - 1) {
         await _sleep(_backoff(attempt));
       }
     }

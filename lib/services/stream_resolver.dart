@@ -1,15 +1,20 @@
 import '../core/constants/api_constants.dart';
 import '../core/provider/provider_failures.dart';
+import '../models/caption_load.dart';
 import '../models/caption_track.dart';
 import '../models/media_item.dart';
 import '../models/provider_match.dart';
 import '../models/stream_source.dart';
+import 'diagnostics_service.dart';
 import 'zarhosting_service.dart';
 
 /// A successfully resolved playback session.
 class ResolvedMediaStream {
   final List<StreamSource> sources;
-  final List<CaptionTrack> captions;
+
+  /// Subtitle discovery outcome for this exact episode. Playback never waits
+  /// for it beyond [StreamResolver.captionBudget].
+  final CaptionLoad captionLoad;
   final ProviderMatch match;
   final Map<String, String> mediaHeaders;
   final DateTime resolvedAt;
@@ -17,12 +22,16 @@ class ResolvedMediaStream {
 
   ResolvedMediaStream({
     required this.sources,
-    required this.captions,
+    List<CaptionTrack> captions = const [],
+    CaptionLoad? captionLoad,
     required this.match,
     required this.mediaHeaders,
     DateTime? resolvedAt,
     this.expiresAt,
-  }) : resolvedAt = resolvedAt ?? DateTime.now();
+  })  : captionLoad = captionLoad ?? CaptionLoad.ofTracks(captions),
+        resolvedAt = resolvedAt ?? DateTime.now();
+
+  List<CaptionTrack> get captions => captionLoad.tracks;
 
   String get providerTitle => match.title;
 
@@ -97,14 +106,24 @@ class PlaybackResolution {
 /// very short window only and dropped immediately when playback reports an
 /// expiry/forbidden failure. Provider match metadata (subject id + detail path)
 /// is safe to cache for much longer and avoids re-searching on every play.
+///
+/// Subtitle lists are cached separately, per provider match, season and
+/// episode, so a subtitle retry never has to resolve the video again.
 class StreamResolver {
   static const Duration streamTtl = Duration(minutes: 2);
   static const Duration matchTtl = Duration(hours: 12);
+  static const Duration captionTtl = Duration(minutes: 10);
+
+  /// Longest time stream resolution waits for subtitles. A slower subtitle
+  /// lookup keeps running in the background and its result is cached.
+  static const Duration captionBudget = Duration(seconds: 6);
 
   final ZarhostingService _service;
   final Map<String, _CachedMatch> _matchCache = {};
   final Map<String, _CachedStream> _streamCache = {};
   final Map<String, Future<PlaybackResolution>> _inFlight = {};
+  final Map<String, _CachedCaptions> _captionCache = {};
+  final Map<String, Future<CaptionLoad>> _captionInFlight = {};
 
   StreamResolver({ZarhostingService? service})
       : _service = service ?? ZarhostingService();
@@ -114,6 +133,7 @@ class StreamResolver {
   void clearCache() {
     _matchCache.clear();
     _streamCache.clear();
+    _captionCache.clear();
   }
 
   /// Drops cached signed URLs for one title/episode after a playback failure.
@@ -124,7 +144,16 @@ class StreamResolver {
     bool dropMatch = false,
   }) {
     _streamCache.remove(_streamKey(item, season, episode));
-    if (dropMatch) _matchCache.remove(_matchKey(item));
+    if (dropMatch) {
+      _matchCache.remove(_matchKey(item));
+      invalidateCaptions(item);
+    }
+  }
+
+  /// Drops every cached subtitle list for a title, across all episodes.
+  void invalidateCaptions(MediaItem item) {
+    final prefix = '${item.mediaType}_${item.id}|';
+    _captionCache.removeWhere((key, _) => key.startsWith(prefix));
   }
 
   Future<PlaybackResolution> resolve({
@@ -161,6 +190,82 @@ class StreamResolver {
     });
     _inFlight[key] = future;
     return future;
+  }
+
+  /// Subtitle discovery for one exact movie or episode.
+  ///
+  /// Returns cached results when fresh, joins an identical request already in
+  /// flight, and otherwise asks the provider. With [budget] set, the wait is
+  /// capped: a slower request resolves to [CaptionLoadStatus.pending] while
+  /// the lookup keeps running and fills the cache for the next caller.
+  Future<CaptionLoad> loadCaptions({
+    required MediaItem item,
+    required ProviderMatch match,
+    int season = 0,
+    int episode = 0,
+    bool forceRefresh = false,
+    Duration? budget,
+  }) {
+    final effectiveSeason = item.mediaType == 'tv' ? season : 0;
+    final effectiveEpisode = item.mediaType == 'tv' ? episode : 0;
+    final key = _captionKey(item, match, effectiveSeason, effectiveEpisode);
+    final future = _captionFuture(
+      key: key,
+      item: item,
+      match: match,
+      season: effectiveSeason,
+      episode: effectiveEpisode,
+      forceRefresh: forceRefresh,
+    );
+    if (budget == null) return future;
+    return future.timeout(budget, onTimeout: () => CaptionLoad.pending());
+  }
+
+  /// Subtitle discovery for a title that was already played or downloaded:
+  /// reuses the known provider match and never resolves the video stream.
+  /// Never throws; failures come back as a [CaptionLoad].
+  Future<CaptionLoad> refreshCaptions({
+    required MediaItem item,
+    ProviderMatch? providerMatch,
+    int season = 0,
+    int episode = 0,
+    bool forceRefresh = false,
+    bool dropMatch = false,
+  }) async {
+    try {
+      // An explicit match (the one that is playing or was downloaded) always
+      // wins, so subtitles can never come from a different provider record.
+      final matchResult = await _resolveMatch(
+        item: item,
+        explicit: providerMatch,
+        forceRefresh: dropMatch,
+      );
+      final match = matchResult.match;
+      if (match == null) {
+        return CaptionLoad.failed(
+          matchResult.asFailure ??
+              const ProviderException(
+                ProviderErrorType.noProviderMatch,
+                'This title is not available on the provider.',
+              ),
+        );
+      }
+      return await loadCaptions(
+        item: item,
+        match: match,
+        season: season,
+        episode: episode,
+        forceRefresh: forceRefresh,
+      );
+    } catch (error) {
+      return CaptionLoad.failed(
+        ProviderException(
+          ProviderErrorType.unknown,
+          'Subtitles are unavailable right now.',
+          diagnostic: error.runtimeType.toString(),
+        ),
+      );
+    }
   }
 
   Future<PlaybackResolution> _resolve({
@@ -200,6 +305,16 @@ class StreamResolver {
     }
 
     onStage?.call(ResolutionStage.resolvingStream);
+    // Subtitles are requested alongside the stream, never before it, and
+    // waited for only up to captionBudget.
+    final captionFuture = loadCaptions(
+      item: item,
+      match: match,
+      season: effectiveSeason,
+      episode: effectiveEpisode,
+      forceRefresh: forceRefresh,
+      budget: captionBudget,
+    );
     try {
       final sources = await _service.resolveStreams(
         match: match,
@@ -214,15 +329,11 @@ class StreamResolver {
           ),
         );
       }
-      final captions = await _service.fetchCaptions(
-        match: match,
-        season: effectiveSeason,
-        episode: effectiveEpisode,
-      );
+      final captionLoad = await captionFuture;
 
       final resolved = ResolvedMediaStream(
         sources: sources,
-        captions: captions,
+        captionLoad: captionLoad,
         match: match,
         mediaHeaders: ApiConstants.zarhostingMediaHeaders,
       );
@@ -251,6 +362,112 @@ class StreamResolver {
         ),
       );
     }
+  }
+
+  Future<CaptionLoad> _captionFuture({
+    required String key,
+    required MediaItem item,
+    required ProviderMatch match,
+    required int season,
+    required int episode,
+    required bool forceRefresh,
+  }) {
+    if (!forceRefresh) {
+      final cached = _captionCache[key];
+      if (cached != null) {
+        if (DateTime.now().difference(cached.storedAt) < captionTtl) {
+          return Future.value(cached.load);
+        }
+        _captionCache.remove(key);
+      }
+      final inFlight = _captionInFlight[key];
+      if (inFlight != null) return inFlight;
+    }
+
+    late final Future<CaptionLoad> future;
+    future = _fetchCaptions(
+      key: key,
+      item: item,
+      match: match,
+      season: season,
+      episode: episode,
+    ).whenComplete(() {
+      // Clear only this request's own entry: a newer forced refresh may have
+      // replaced it while this one was still running.
+      if (identical(_captionInFlight[key], future)) {
+        _captionInFlight.remove(key);
+      }
+    });
+    _captionInFlight[key] = future;
+    return future;
+  }
+
+  /// Never throws. Only fully loaded lists are cached: an empty or failed
+  /// answer is re-checked on the next request rather than trusted.
+  Future<CaptionLoad> _fetchCaptions({
+    required String key,
+    required MediaItem item,
+    required ProviderMatch match,
+    required int season,
+    required int episode,
+  }) async {
+    CaptionLoad load;
+    try {
+      load = await _service.fetchCaptionLoad(
+        match: match,
+        season: season,
+        episode: episode,
+      );
+    } on ProviderException catch (error) {
+      load = CaptionLoad.failed(error);
+    } catch (error) {
+      load = CaptionLoad.failed(
+        ProviderException(
+          ProviderErrorType.unknown,
+          'Subtitles are unavailable right now.',
+          diagnostic: error.runtimeType.toString(),
+        ),
+      );
+    }
+
+    if (load.isLoaded) {
+      _captionCache[key] = _CachedCaptions(load);
+    } else {
+      _captionCache.remove(key);
+    }
+    _recordCaptions(item, match, season, episode, load);
+    return load;
+  }
+
+  void _recordCaptions(
+    MediaItem item,
+    ProviderMatch match,
+    int season,
+    int episode,
+    CaptionLoad load,
+  ) {
+    DiagnosticsService.instance.record(
+      scope: 'subtitles',
+      operation: 'discover',
+      failureType: load.failure?.type,
+      data: {
+        'tmdb': item.id,
+        'mediaType': item.mediaType,
+        'subject': match.subjectId,
+        'detailPath': match.detailPath,
+        'season': season,
+        'episode': episode,
+        'status': load.status.name,
+        'shape': load.shape,
+        'raw': load.rawCount,
+        'tracks': load.tracks.length,
+        'rejected': load.rejectedCount,
+        'reasons': load.rejectionReasons.join('|'),
+        'languages': load.tracks.map((track) => track.language).join(','),
+        'http': load.failure?.statusCode ?? 0,
+        'diag': load.failure?.diagnostic ?? '',
+      },
+    );
   }
 
   Future<ProviderMatchResult> _resolveMatch({
@@ -290,6 +507,17 @@ class StreamResolver {
 
   String _streamKey(MediaItem item, int season, int episode) =>
       '${item.mediaType}_${item.id}_${season}_$episode';
+
+  /// Includes the provider identity, so a changed provider match can never
+  /// reuse subtitles fetched for a different record.
+  String _captionKey(
+    MediaItem item,
+    ProviderMatch match,
+    int season,
+    int episode,
+  ) =>
+      '${item.mediaType}_${item.id}|${match.subjectId}|${match.detailPath}'
+      '|s${season}e$episode';
 }
 
 class _CachedMatch {
@@ -309,4 +537,11 @@ class _CachedStream {
     if (stream.isExpired) return true;
     return DateTime.now().difference(storedAt) > StreamResolver.streamTtl;
   }
+}
+
+class _CachedCaptions {
+  final CaptionLoad load;
+  final DateTime storedAt;
+
+  _CachedCaptions(this.load) : storedAt = DateTime.now();
 }

@@ -6,8 +6,10 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/constants/api_constants.dart';
+import '../models/caption_load.dart';
 import '../models/caption_track.dart';
 import '../models/media_item.dart';
+import '../models/provider_match.dart';
 import '../models/offline_download.dart';
 import '../models/stream_source.dart';
 import 'diagnostics_service.dart';
@@ -80,6 +82,12 @@ class DownloadService extends ChangeNotifier {
   String? _error;
   bool _wifiOnly = false;
   List<String> _preferredSubtitleLanguages = const [];
+  bool _disposed = false;
+
+  /// Background subtitle pass for the most recent download. Tests await it;
+  /// the app never does, so a subtitle pass cannot delay a video.
+  @visibleForTesting
+  Future<void>? pendingSubtitleWork;
   Future<void> _persistChain = Future.value();
 
   List<OfflineDownload> get downloads => List.unmodifiable(_downloads);
@@ -313,87 +321,76 @@ class DownloadService extends ChangeNotifier {
     );
     final videoPath = '$directory${Platform.pathSeparator}$fileName';
 
-    final selectedCaptions = effective.captions
-        .where((caption) => subtitleLanguages.contains(caption.language))
-        .toList(growable: false);
-    final subtitleResult = await _saveSubtitles(
-      captions: selectedCaptions,
-      directory: directory,
-      videoPath: videoPath,
-    );
-    if (subtitleResult.failedLanguages.isNotEmpty) {
-      DiagnosticsService.instance.record(
-        scope: 'downloads',
-        operation: 'subtitle_pairing',
-        data: {
-          'failed': subtitleResult.failedLanguages.join(','),
-          'saved': subtitleResult.saved.length,
+    await _engine.requestNotificationPermission();
+    final result = await _engine.enqueue(
+      DownloadEnqueueRequest(
+        url: chosen.url,
+        fileName: fileName,
+        title: isEpisode
+            ? '${item.title} · S$effectiveSeason:E$effectiveEpisode'
+            : item.title,
+        description: 'Saved in Flix · ${chosen.resolution}',
+        headers: <String, String>{
+          ...ApiConstants.zarhostingMediaHeaders,
+          ...chosen.headers,
         },
-      );
+        wifiOnly: wifiOnly ?? _wifiOnly,
+      ),
+    );
+    final nativeId = (result['id'] as num?)?.toInt() ?? 0;
+    if (nativeId <= 0) {
+      throw StateError('Android did not start this download.');
     }
+    final returnedPath = (result['filePath'] ?? videoPath).toString();
 
-    try {
-      await _engine.requestNotificationPermission();
-      final result = await _engine.enqueue(
-        DownloadEnqueueRequest(
-          url: chosen.url,
-          fileName: fileName,
-          title: isEpisode
-              ? '${item.title} · S$effectiveSeason:E$effectiveEpisode'
-              : item.title,
-          description: 'Saved in Flix · ${chosen.resolution}',
-          headers: <String, String>{
-            ...ApiConstants.zarhostingMediaHeaders,
-            ...chosen.headers,
-          },
-          wifiOnly: wifiOnly ?? _wifiOnly,
-        ),
-      );
-      final nativeId = (result['id'] as num?)?.toInt() ?? 0;
-      if (nativeId <= 0) {
-        throw StateError('Android did not start this download.');
-      }
-      final returnedPath = (result['filePath'] ?? videoPath).toString();
+    final job = OfflineDownload(
+      key: '$nativeId-$stamp',
+      nativeId: nativeId,
+      item: item,
+      season: effectiveSeason,
+      episode: effectiveEpisode,
+      episodeTitle: episodeTitle,
+      resolution: chosen.resolution,
+      qualityValue: chosen.qualityValue,
+      filePath: returnedPath,
+      subtitles: const [],
+      subtitleLanguages: subtitleLanguages.toList()..sort(),
+      status: 'pending',
+      downloadedBytes: 0,
+      totalBytes: chosen.sizeBytes,
+      expectedBytes: chosen.sizeBytes,
+      createdAt: DateTime.now(),
+      profileIndex: profileIndex,
+      verified: false,
+      format: chosen.format,
+    );
 
-      final job = OfflineDownload(
-        key: '$nativeId-$stamp',
-        nativeId: nativeId,
-        item: item,
-        season: effectiveSeason,
-        episode: effectiveEpisode,
-        episodeTitle: episodeTitle,
-        resolution: chosen.resolution,
-        qualityValue: chosen.qualityValue,
-        filePath: returnedPath,
-        subtitles: subtitleResult.saved,
-        subtitleLanguages: subtitleLanguages.toList()..sort(),
-        status: 'pending',
-        downloadedBytes: 0,
-        totalBytes: chosen.sizeBytes,
-        expectedBytes: chosen.sizeBytes,
-        createdAt: DateTime.now(),
-        profileIndex: profileIndex,
-        verified: false,
-        format: chosen.format,
+    // A failed record for the same media + quality is superseded, never a
+    // verified file: the new transfer uses its own unique file name.
+    _downloads.removeWhere(
+      (entry) =>
+          entry.isFailed && entry.downloadIdentity == job.downloadIdentity,
+    );
+    _downloads.insert(0, job);
+    _error = null;
+    await _persist();
+    _restartPolling();
+    notifyListeners();
+    if (subtitleLanguages.isNotEmpty) {
+      // Subtitles are saved after the video is queued; they never delay it.
+      final pass = _attachSubtitles(
+        job: job,
+        match: effective.match,
+        languages: subtitleLanguages.toSet(),
+        directory: directory,
+        // The engine's own path, so subtitle names follow the real file.
+        videoPath: returnedPath,
+        initialLoad: effective.captionLoad,
       );
-
-      // A failed record for the same media + quality is superseded, never a
-      // verified file: the new transfer uses its own unique file name.
-      _downloads.removeWhere(
-        (entry) =>
-            entry.isFailed && entry.downloadIdentity == job.downloadIdentity,
-      );
-      _downloads.insert(0, job);
-      _error = null;
-      await _persist();
-      _restartPolling();
-      notifyListeners();
-      return job;
-    } catch (error) {
-      // The video never started: clean up subtitles written for it.
-      await _deleteSubtitleFiles(subtitleResult.saved, directory);
-      rethrow;
+      pendingSubtitleWork = pass;
+      unawaited(pass);
     }
+    return job;
   }
 
   /// Re-resolves and restarts a failed download. A verified copy is never
@@ -443,62 +440,6 @@ class DownloadService extends ChangeNotifier {
       subtitleLanguages: languages,
       profileIndex: job.profileIndex,
     );
-  }
-
-  /// Retries only the subtitle files for an already downloaded video.
-  Future<OfflineDownload> retrySubtitles(OfflineDownload job) async {
-    await init();
-    final directory = await _engine.getDirectory();
-    if (directory.isEmpty) {
-      throw StateError('Flix could not open its private downloads folder.');
-    }
-    final resolution = await _resolver.resolve(
-      item: job.item,
-      season: job.season,
-      episode: job.episode,
-      forceRefresh: true,
-    );
-    if (!resolution.isSuccess) {
-      throw StateError(
-        resolution.failure?.message ?? 'Subtitle tracks are unavailable.',
-      );
-    }
-    final captions = resolution.stream!.captions;
-    if (captions.isEmpty) {
-      throw StateError('The provider has no subtitles for this title.');
-    }
-    final wanted = job.subtitleLanguages.isNotEmpty
-        ? job.subtitleLanguages.toSet()
-        : _preferredSubtitleLanguages.toSet();
-    final selected = wanted.isEmpty
-        ? captions
-        : captions
-            .where((caption) => wanted.contains(caption.language))
-            .toList(growable: false);
-    final result = await _saveSubtitles(
-      captions: selected,
-      directory: directory,
-      videoPath: job.filePath,
-    );
-    final merged = <String, OfflineSubtitle>{
-      for (final subtitle in job.subtitles) subtitle.language: subtitle,
-      for (final subtitle in result.saved) subtitle.language: subtitle,
-    };
-    final updated = job.copyWith(
-      subtitles: merged.values.toList(growable: false),
-      clearFailure: job.isComplete && result.saved.isNotEmpty,
-      status: job.isComplete ? 'completed' : job.status,
-    );
-    final index = _downloads.indexWhere((entry) => entry.key == job.key);
-    if (index >= 0) _downloads[index] = updated;
-    await _persist();
-    notifyListeners();
-    if (result.saved.isEmpty) {
-      throw StateError(
-        'No subtitle files could be saved. They may have expired at the provider.',
-      );
-    }
-    return updated;
   }
 
   Future<void> cancel(OfflineDownload job) async {
@@ -756,38 +697,282 @@ class DownloadService extends ChangeNotifier {
     );
   }
 
-  Future<_SubtitleSaveResult> _saveSubtitles({
-    required List<CaptionTrack> captions,
+  /// Saves the selected subtitles for an already-queued video. Runs in the
+  /// background so a slow or failing subtitle host never delays or cancels
+  /// the video transfer. Every language ends up either saved or with a reason.
+  Future<void> _attachSubtitles({
+    required OfflineDownload job,
+    required ProviderMatch match,
+    required Set<String> languages,
+    required String directory,
+    required String videoPath,
+    CaptionLoad? initialLoad,
+  }) async {
+    try {
+      var load = initialLoad;
+      if (load == null ||
+          load.status == CaptionLoadStatus.pending ||
+          load.status == CaptionLoadStatus.failed) {
+        load = await _resolver.refreshCaptions(
+          item: job.item,
+          providerMatch: match,
+          season: job.season,
+          episode: job.episode,
+        );
+      }
+      final result = await _saveSelected(
+        load: load,
+        languages: languages,
+        directory: directory,
+        videoPath: videoPath,
+      );
+      final updated = await _mutateJob(
+        job.key,
+        (current) => current.copyWith(
+          subtitles: _mergeSubtitles(current.subtitles, result.saved),
+          subtitleIssues: result.issues,
+        ),
+      );
+      if (updated == null) {
+        // The download was deleted while its subtitles were being saved.
+        await _deleteSubtitleFiles(result.saved, directory);
+        return;
+      }
+      DiagnosticsService.instance.record(
+        scope: 'downloads',
+        operation: 'subtitle_pairing',
+        data: {
+          'selected': languages.length,
+          'saved': result.saved.length,
+          'missing': result.issues.keys.join(','),
+        },
+      );
+    } catch (error) {
+      DiagnosticsService.instance.record(
+        scope: 'downloads',
+        operation: 'subtitle_pairing',
+        error: error,
+      );
+      await _mutateJob(
+        job.key,
+        (current) => current.copyWith(
+          subtitleIssues: {
+            for (final language in languages)
+              language: 'Subtitles could not be saved. Retry subtitles.',
+          },
+        ),
+      );
+    }
+  }
+
+  Future<_SubtitleSaveResult> _saveSelected({
+    required CaptionLoad load,
+    required Set<String> languages,
+    required String directory,
+    required String videoPath,
+  }) async {
+    if (!load.isLoaded) {
+      return _SubtitleSaveResult(
+        saved: const [],
+        issues: {
+          for (final language in languages) language: load.userMessage,
+        },
+      );
+    }
+    final candidates = load.tracks
+        .where((track) => languages.contains(track.language))
+        .toList(growable: false);
+    final write = await _saveSubtitles(
+      tracks: candidates,
+      directory: directory,
+      videoPath: videoPath,
+    );
+    final savedLanguages = write.saved.map((entry) => entry.language).toSet();
+    final issues = <String, String>{};
+    for (final language in languages) {
+      if (savedLanguages.contains(language)) continue;
+      issues[language] = write.failures[language] ??
+          (candidates.any((track) => track.language == language)
+              ? 'Subtitles could not be saved.'
+              : 'The provider does not list this language for this episode.');
+    }
+    return _SubtitleSaveResult(saved: write.saved, issues: issues);
+  }
+
+  /// Writes each track to its own file, named after the video so the pair
+  /// stays deterministic. Tracks that share a language get a numbered tag.
+  Future<_SubtitleWriteResult> _saveSubtitles({
+    required List<CaptionTrack> tracks,
     required String directory,
     required String videoPath,
   }) async {
     final saved = <OfflineSubtitle>[];
-    final failures = <String>[];
-    for (final caption in captions) {
+    final failures = <String, String>{};
+    final tagCounts = <String, int>{};
+    for (final track in tracks) {
+      final base = DownloadValidation.safeName(track.language, maxLength: 12);
+      final count = (tagCounts[base] ?? 0) + 1;
+      tagCounts[base] = count;
+      final tag = count == 1 ? base : '${base}_$count';
       try {
-        final file = await SubtitleService.fetchValidated(caption);
-        final extension = file.extension;
-        final language = DownloadValidation.safeName(
-          file.language,
-          maxLength: 12,
-        );
+        final file = await SubtitleService.fetchValidated(track);
         final path = '$directory${Platform.pathSeparator}'
-            '${DownloadValidation.subtitleFileName(videoPath: videoPath, language: language, extension: extension)}';
+            '${DownloadValidation.subtitleFileName(videoPath: videoPath, language: tag, extension: file.extension)}';
         await File(path).writeAsString(file.text, flush: true);
         saved.add(
           OfflineSubtitle(
-            language: file.language,
-            languageName: file.languageName,
+            language: track.language,
+            languageName: track.languageName,
             path: path,
             sizeBytes: file.sizeBytes,
           ),
         );
+      } on SubtitleException catch (error) {
+        failures[track.language] = error.message;
       } catch (_) {
-        // A subtitle problem never cancels the video transfer.
-        failures.add(caption.language);
+        failures[track.language] =
+            'The subtitle could not be saved to this device.';
       }
     }
-    return _SubtitleSaveResult(saved: saved, failedLanguages: failures);
+    return _SubtitleWriteResult(saved: saved, failures: failures);
+  }
+
+  /// Keeps one entry per file. A re-saved subtitle replaces its old entry.
+  static List<OfflineSubtitle> _mergeSubtitles(
+    List<OfflineSubtitle> existing,
+    List<OfflineSubtitle> added,
+  ) {
+    final byPath = <String, OfflineSubtitle>{
+      for (final subtitle in existing) subtitle.path: subtitle,
+    };
+    for (final subtitle in added) {
+      byPath[subtitle.path] = subtitle;
+    }
+    return byPath.values
+        .where((subtitle) => subtitle.isUsable)
+        .toList(growable: false);
+  }
+
+  OfflineDownload? _findByKey(String key) {
+    for (final entry in _downloads) {
+      if (entry.key == key) return entry;
+    }
+    return null;
+  }
+
+  /// Applies [change] to the stored record and persists it. Returns null when
+  /// the download no longer exists.
+  Future<OfflineDownload?> _mutateJob(
+    String key,
+    OfflineDownload Function(OfflineDownload job) change,
+  ) async {
+    final index = _downloads.indexWhere((entry) => entry.key == key);
+    if (index < 0) return null;
+    final updated = change(_downloads[index]);
+    _downloads[index] = updated;
+    await _persist();
+    if (!_disposed) notifyListeners();
+    return updated;
+  }
+
+  /// Saves only the subtitle languages still missing for a downloaded video.
+  /// Saved files and the video are left untouched, and no stream is
+  /// re-resolved: only the subtitle list is fetched again.
+  Future<SubtitleRetryReport> retrySubtitles(OfflineDownload job) async {
+    await init();
+    final current = _findByKey(job.key);
+    if (current == null) {
+      throw StateError('This download is no longer in your library.');
+    }
+    final directory = await _engine.getDirectory();
+    if (directory.isEmpty) {
+      throw StateError('Flix could not open its private downloads folder.');
+    }
+
+    // Only the languages chosen for this download are ever fetched.
+    final wanted = current.subtitleLanguages.toSet();
+    final saved = current.subtitles
+        .where((subtitle) => subtitle.isUsable)
+        .map((subtitle) => subtitle.language)
+        .toSet();
+    final missing =
+        wanted.where((language) => !saved.contains(language)).toSet();
+    if (missing.isEmpty) {
+      return SubtitleRetryReport(
+        job: current,
+        saved: const [],
+        failed: const {},
+        unavailable: const [],
+      );
+    }
+
+    final load = await _resolver.refreshCaptions(
+      item: current.item,
+      season: current.season,
+      episode: current.episode,
+      forceRefresh: true,
+    );
+    if (!load.isLoaded) {
+      final reason = load.userMessage;
+      final updated = await _mutateJob(
+        current.key,
+        (entry) => entry.copyWith(
+          subtitleIssues: {
+            ...entry.subtitleIssues,
+            for (final language in missing) language: reason,
+          },
+        ),
+      );
+      return SubtitleRetryReport(
+        job: updated ?? current,
+        saved: const [],
+        failed: {for (final language in missing) language: reason},
+        unavailable: const [],
+      );
+    }
+
+    final targets = load.tracks
+        .where((track) => missing.contains(track.language))
+        .toList(growable: false);
+    final unavailable = missing
+        .where((language) =>
+            !load.tracks.any((track) => track.language == language))
+        .toList(growable: false);
+
+    final write = await _saveSubtitles(
+      tracks: targets,
+      directory: directory,
+      videoPath: current.filePath,
+    );
+    final savedLanguages =
+        write.saved.map((subtitle) => subtitle.language).toSet();
+    final failed = <String, String>{
+      for (final entry in write.failures.entries)
+        if (!savedLanguages.contains(entry.key)) entry.key: entry.value,
+    };
+    final issues = <String, String>{
+      for (final language in unavailable)
+        language: 'The provider does not list this language for this episode.',
+      ...failed,
+    };
+
+    final updated = await _mutateJob(
+      current.key,
+      (entry) => entry.copyWith(
+        subtitles: _mergeSubtitles(entry.subtitles, write.saved),
+        subtitleIssues: issues,
+      ),
+    );
+    if (updated == null) {
+      await _deleteSubtitleFiles(write.saved, directory);
+      throw StateError('This download was removed while subtitles were saved.');
+    }
+    return SubtitleRetryReport(
+      job: updated,
+      saved: savedLanguages.toList()..sort(),
+      failed: failed,
+      unavailable: unavailable,
+    );
   }
 
   Future<void> _deleteSubtitleFiles(
@@ -841,6 +1026,7 @@ class DownloadService extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
     _pollTimer?.cancel();
     _pollTimer = null;
     _probe.dispose();
@@ -848,12 +1034,47 @@ class DownloadService extends ChangeNotifier {
   }
 }
 
+/// Summary of a subtitle retry, shown to the viewer.
+class SubtitleRetryReport {
+  final OfflineDownload job;
+  final List<String> saved;
+  final Map<String, String> failed;
+  final List<String> unavailable;
+
+  const SubtitleRetryReport({
+    required this.job,
+    required this.saved,
+    required this.failed,
+    required this.unavailable,
+  });
+
+  /// Short, user-facing summary of what changed.
+  String get summary {
+    final parts = <String>[];
+    if (saved.isNotEmpty) parts.add('Saved ${saved.join(', ')}.');
+    if (failed.isNotEmpty) {
+      final reasons = failed.values.toSet().join(' ');
+      parts.add('Still missing ${failed.keys.join(', ')}. $reasons');
+    }
+    if (unavailable.isNotEmpty) {
+      parts.add('Not offered for this episode: ${unavailable.join(', ')}.');
+    }
+    return parts.isEmpty
+        ? 'All selected subtitles are already saved.'
+        : parts.join(' ');
+  }
+}
+
+class _SubtitleWriteResult {
+  final List<OfflineSubtitle> saved;
+  final Map<String, String> failures;
+
+  const _SubtitleWriteResult({required this.saved, required this.failures});
+}
+
 class _SubtitleSaveResult {
   final List<OfflineSubtitle> saved;
-  final List<String> failedLanguages;
+  final Map<String, String> issues;
 
-  const _SubtitleSaveResult({
-    required this.saved,
-    required this.failedLanguages,
-  });
+  const _SubtitleSaveResult({required this.saved, required this.issues});
 }

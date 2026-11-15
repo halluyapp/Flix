@@ -143,6 +143,31 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
     await _refreshAll();
   }
 
+  /// Saves subtitles that are still missing for a finished download. The video
+  /// file is never touched.
+  Future<void> _retrySubtitles(OfflineDownload job) async {
+    final service = context.read<DownloadService>();
+    try {
+      final report = await service.retrySubtitles(job);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(report.summary),
+          backgroundColor: const Color(0xFF262626),
+        ),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(error.toString().replaceFirst('Bad state: ', '')),
+          backgroundColor: const Color(0xFF262626),
+        ),
+      );
+    }
+    await _refreshAll();
+  }
+
   Future<void> _run(Future<void> Function() action) async {
     try {
       await action();
@@ -308,6 +333,7 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
                   episodes: episodes,
                   onPlay: _playDownload,
                   onDeleteEpisode: _confirmDelete,
+                  onRetrySubtitles: _retrySubtitles,
                   onDeleteAll: () => _confirmDeleteSeries(episodes.first.item.title, episodes),
                 ),
               ),
@@ -343,6 +369,7 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
           job: job,
           onPlay: () => _playDownload(job),
           onDelete: () => _confirmDelete(job),
+          onRetrySubtitles: () => _retrySubtitles(job),
         ),
       );
     }
@@ -586,11 +613,13 @@ class _MovieDownloadCard extends StatelessWidget {
   final OfflineDownload job;
   final VoidCallback onPlay;
   final VoidCallback onDelete;
+  final VoidCallback? onRetrySubtitles;
 
   const _MovieDownloadCard({
     required this.job,
     required this.onPlay,
     required this.onDelete,
+    this.onRetrySubtitles,
   });
 
   @override
@@ -734,9 +763,15 @@ class _MovieDownloadCard extends StatelessWidget {
                   color: const Color(0xFF303030),
                   onSelected: (value) {
                     if (value == 'delete') onDelete();
+                    if (value == 'subtitles') onRetrySubtitles?.call();
                   },
-                  itemBuilder: (_) => const [
-                    PopupMenuItem(
+                  itemBuilder: (_) => [
+                    if (job.hasMissingSubtitles && onRetrySubtitles != null)
+                      const PopupMenuItem(
+                        value: 'subtitles',
+                        child: Text('Retry subtitles'),
+                      ),
+                    const PopupMenuItem(
                       value: 'delete',
                       child: Text('Delete download'),
                     ),
@@ -757,6 +792,7 @@ class SeriesDownloadsScreen extends StatelessWidget {
   final List<OfflineDownload> episodes;
   final ValueChanged<OfflineDownload> onPlay;
   final ValueChanged<OfflineDownload> onDeleteEpisode;
+  final ValueChanged<OfflineDownload>? onRetrySubtitles;
   final VoidCallback onDeleteAll;
 
   const SeriesDownloadsScreen({
@@ -765,6 +801,7 @@ class SeriesDownloadsScreen extends StatelessWidget {
     required this.episodes,
     required this.onPlay,
     required this.onDeleteEpisode,
+    this.onRetrySubtitles,
     required this.onDeleteAll,
   });
 
@@ -830,6 +867,9 @@ class SeriesDownloadsScreen extends StatelessWidget {
                 job: ep,
                 onPlay: () => onPlay(ep),
                 onDelete: () => onDeleteEpisode(ep),
+                onRetrySubtitles: onRetrySubtitles == null
+                    ? null
+                    : () => onRetrySubtitles!(ep),
               ),
           ],
         ],
@@ -842,11 +882,13 @@ class _EpisodeDownloadTile extends StatelessWidget {
   final OfflineDownload job;
   final VoidCallback onPlay;
   final VoidCallback onDelete;
+  final VoidCallback? onRetrySubtitles;
 
   const _EpisodeDownloadTile({
     required this.job,
     required this.onPlay,
     required this.onDelete,
+    this.onRetrySubtitles,
   });
 
   @override
@@ -961,6 +1003,13 @@ class _EpisodeDownloadTile extends StatelessWidget {
                     ],
                   ),
                 ),
+                if (job.hasMissingSubtitles && onRetrySubtitles != null)
+                  IconButton(
+                    tooltip: 'Retry subtitles',
+                    icon: const Icon(Icons.subtitles_outlined,
+                        color: Colors.white70, size: 20),
+                    onPressed: onRetrySubtitles,
+                  ),
                 IconButton(
                   tooltip: 'Delete episode',
                   icon: const Icon(Icons.delete_outline, color: Colors.white54, size: 20),
