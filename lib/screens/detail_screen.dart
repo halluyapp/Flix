@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -159,16 +160,41 @@ class _DetailScreenState extends State<DetailScreen> {
   }
 
   void _play({Episode? episode}) {
+    if (episode != null && !episode.isReleased) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '${episode.name} airs on ${episode.airDate}. Not yet released.',
+          ),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
+
     final season = episode?.seasonNumber ??
         (_isSeries ? _selectedSeason : 0);
     final episodeNumber = episode?.episodeNumber ??
         (_isSeries && _episodes.isNotEmpty ? _episodes.first.episodeNumber : 0);
+
+    final downloadService = context.read<DownloadService>();
+    final offline = downloadService.downloadStateFor(
+      widget.item,
+      season: season > 0 ? season : 1,
+      episode: episodeNumber > 0 ? episodeNumber : 1,
+    );
+    final hasOfflineFile = offline != null &&
+        offline.isComplete &&
+        File(offline.filePath).existsSync();
+
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => PlayerScreen(
           item: widget.item,
           startSeason: season > 0 ? season : 1,
           startEpisode: episodeNumber > 0 ? episodeNumber : 1,
+          offlineFilePath: hasOfflineFile ? offline.filePath : null,
+          offlineSubtitles: hasOfflineFile ? offline.subtitles : const [],
         ),
       ),
     );
@@ -529,53 +555,69 @@ class _DetailScreenState extends State<DetailScreen> {
                         ),
                       ),
                       subtitle: Text(
-                        [
-                          '${episode.runtime}m',
-                          if (download != null)
-                            download.isComplete
-                                ? 'Downloaded · ${download.resolution}'
-                                : download.isProcessing
-                                    ? 'Downloading…'
-                                    : 'Download failed',
-                        ].join(' · '),
+                        !episode.isReleased
+                            ? episode.releaseBadge
+                            : [
+                                '${episode.runtime}m',
+                                if (download != null)
+                                  download.isComplete
+                                      ? 'Downloaded · ${download.resolution}'
+                                      : download.isProcessing
+                                          ? 'Downloading…'
+                                          : 'Download failed',
+                              ].join(' · '),
                         style: TextStyle(
-                          color: download?.isComplete == true
-                              ? const Color(0xFF46D369)
-                              : Colors.white54,
+                          color: !episode.isReleased
+                              ? const Color(0xFFE5A158)
+                              : (download?.isComplete == true
+                                  ? const Color(0xFF46D369)
+                                  : Colors.white54),
                           fontSize: 11,
                         ),
                       ),
-                      trailing: download != null && download.isComplete
-                          ? IconButton(
-                              tooltip: 'Play downloaded episode',
-                              icon: const Icon(
-                                Icons.download_done,
-                                color: Color(0xFF46D369),
+                      trailing: !episode.isReleased
+                          ? Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: Colors.white10,
+                                borderRadius: BorderRadius.circular(4),
                               ),
-                              onPressed: () {
-                                Navigator.of(context).push(
-                                  MaterialPageRoute(
-                                    builder: (_) => PlayerScreen(
-                                      item: widget.item,
-                                      startSeason: download.season,
-                                      startEpisode: download.episode,
-                                      offlineFilePath: download.filePath,
-                                      offlineSubtitles: download.subtitles,
-                                    ),
-                                  ),
-                                );
-                              },
+                              child: const Text(
+                                'Soon',
+                                style: TextStyle(color: Colors.white54, fontSize: 11),
+                              ),
                             )
-                          : IconButton(
-                              tooltip: 'Download episode',
-                              icon: Icon(
-                                Icons.download_for_offline_outlined,
-                                color: download?.isProcessing == true
-                                    ? _accent
-                                    : Colors.white70,
-                              ),
-                              onPressed: () => _openEpisodeDownload(episode),
-                            ),
+                          : (download != null && download.isComplete
+                              ? IconButton(
+                                  tooltip: 'Play downloaded episode',
+                                  icon: const Icon(
+                                    Icons.download_done,
+                                    color: Color(0xFF46D369),
+                                  ),
+                                  onPressed: () {
+                                    Navigator.of(context).push(
+                                      MaterialPageRoute(
+                                        builder: (_) => PlayerScreen(
+                                          item: widget.item,
+                                          startSeason: download.season,
+                                          startEpisode: download.episode,
+                                          offlineFilePath: download.filePath,
+                                          offlineSubtitles: download.subtitles,
+                                        ),
+                                      ),
+                                    );
+                                  },
+                                )
+                              : IconButton(
+                                  tooltip: 'Download episode',
+                                  icon: Icon(
+                                    Icons.download_for_offline_outlined,
+                                    color: download?.isProcessing == true
+                                        ? _accent
+                                        : Colors.white70,
+                                  ),
+                                  onPressed: () => _openEpisodeDownload(episode),
+                                )),
                       onTap: () => _play(episode: episode),
                     );
                   },

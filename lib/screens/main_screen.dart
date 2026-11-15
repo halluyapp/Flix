@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'clips_screen.dart';
 import 'home_screen.dart';
 import 'new_and_hot_screen.dart';
@@ -14,8 +15,28 @@ class MainScreen extends StatefulWidget {
 
 class _MainScreenState extends State<MainScreen> {
   static const int _tabCount = 5;
+  static const String _tabKey = 'flix_last_selected_tab';
   int _currentIndex = 0;
   final Set<int> _visitedTabs = {0};
+
+  @override
+  void initState() {
+    super.initState();
+    _restoreLastTab();
+  }
+
+  Future<void> _restoreLastTab() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final lastTab = prefs.getInt(_tabKey);
+      if (lastTab != null && lastTab >= 0 && lastTab < _tabCount && mounted) {
+        setState(() {
+          _currentIndex = lastTab;
+          _visitedTabs.add(lastTab);
+        });
+      }
+    } catch (_) {}
+  }
 
   Widget _screenFor(int index) {
     switch (index) {
@@ -40,6 +61,9 @@ class _MainScreenState extends State<MainScreen> {
       _currentIndex = index;
       _visitedTabs.add(index);
     });
+    SharedPreferences.getInstance().then((prefs) {
+      prefs.setInt(_tabKey, index);
+    }).catchError((_) {});
   }
 
   @override

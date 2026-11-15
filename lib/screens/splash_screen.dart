@@ -1,4 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import '../services/user_state_service.dart';
+import 'main_screen.dart';
 import 'profile_screen.dart';
 
 class SplashScreen extends StatefulWidget {
@@ -18,7 +21,7 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1400),
+      duration: const Duration(milliseconds: 1200),
     );
 
     _scaleAnimation = Tween<double>(begin: 0.85, end: 1.15).animate(
@@ -31,10 +34,14 @@ class _SplashScreenState extends State<SplashScreen> with SingleTickerProviderSt
 
     _controller.forward();
 
-    Future.delayed(const Duration(milliseconds: 2200), () {
+    Future.delayed(const Duration(milliseconds: 1500), () {
       if (mounted) {
+        final userState = Provider.of<UserStateService>(context, listen: false);
+        final destination = userState.hasChosenProfile
+            ? const MainScreen()
+            : const ProfileScreen();
         Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => const ProfileScreen()),
+          MaterialPageRoute(builder: (_) => destination),
         );
       }
     });

@@ -78,6 +78,7 @@ class UserStateService extends ChangeNotifier {
 
   List<UserProfile> get profiles => List.unmodifiable(_profiles);
   UserProfile get currentProfile => _currentProfile;
+  bool get hasChosenProfile => _prefs?.getString('flix_active_profile_id') != null;
   List<MediaItem> get myList => List.unmodifiable(_myList);
   List<WatchProgress> get continueWatching => List.unmodifiable(_continueWatching);
 

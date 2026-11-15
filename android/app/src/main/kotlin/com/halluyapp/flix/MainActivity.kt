@@ -2,6 +2,8 @@ package com.halluyapp.flix
 
 import android.Manifest
 import android.app.DownloadManager
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.database.Cursor
@@ -19,9 +21,12 @@ import java.io.File
 class MainActivity : FlutterActivity() {
     private val downloadChannel = "flix.downloads"
     private val notificationRequestCode = 4301
+    private val flixDownloadChannelId = "flix_downloads"
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        createNotificationChannel()
+
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, downloadChannel)
             .setMethodCallHandler { call, result ->
                 try {
@@ -62,6 +67,21 @@ class MainActivity : FlutterActivity() {
             }
     }
 
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                flixDownloadChannelId,
+                "Flix Downloads",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Shows progress for Flix movies and series downloads"
+                setShowBadge(true)
+            }
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            manager?.createNotificationChannel(channel)
+        }
+    }
+
     private fun downloadDirectory(): File {
         val root = getExternalFilesDir(Environment.DIRECTORY_MOVIES)
             ?: throw IllegalStateException("App-private download storage is unavailable")
@@ -92,15 +112,12 @@ class MainActivity : FlutterActivity() {
             "A file with this download name already exists"
         }
 
+        val displayTitle = arguments["title"]?.toString()?.trim().orEmpty().ifBlank { "Movie" }
+        val displayDesc = arguments["description"]?.toString()?.trim().orEmpty().ifBlank { "Saved in Flix" }
+
         val request = DownloadManager.Request(uri)
-            .setTitle(
-                arguments["title"]?.toString()?.ifBlank { "Flix download" }
-                    ?: "Flix download"
-            )
-            .setDescription(
-                arguments["description"]?.toString()?.ifBlank { "Saved in Flix" }
-                    ?: "Saved in Flix"
-            )
+            .setTitle("Flix · $displayTitle")
+            .setDescription("Flix · $displayDesc")
             .setMimeType("video/mp4")
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
             .setAllowedOverRoaming(false)

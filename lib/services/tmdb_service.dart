@@ -128,15 +128,41 @@ class TmdbService {
   }
 
   /// Real season list from TMDB. Never hardcodes a season count.
+  /// If the direct /tv/{id} endpoint is rejected by the catalogue proxy,
+  /// it discovers seasons 1..10 in parallel via the supported
+  /// /tv/{id}/season/{s} route so Season 2, Season 3, etc. are visible.
   Future<List<TvSeason>> getSeasons(int tvId) async {
     final data = await _fetchTmdb('/tv/$tvId');
     if (data is Map && data['seasons'] is List) {
-      return (data['seasons'] as List)
+      final list = (data['seasons'] as List)
           .whereType<Map>()
           .map((entry) => TvSeason.fromJson(Map<String, dynamic>.from(entry)))
+          .where((s) => s.hasEpisodes || s.seasonNumber > 0)
           .toList(growable: false);
+      if (list.isNotEmpty) return list;
     }
-    return const [];
+
+    final probes = await Future.wait([
+      for (int s = 1; s <= 10; s++) _fetchTmdb('/tv/$tvId/season/$s'),
+    ]);
+
+    final List<TvSeason> discovered = [];
+    for (int i = 0; i < probes.length; i++) {
+      final seasonNum = i + 1;
+      final res = probes[i];
+      if (res is Map) {
+        final eps = res['episodes'] as List? ?? [];
+        final name = (res['name'] ?? 'Season $seasonNum').toString();
+        final airDate = (res['air_date'] ?? '').toString();
+        discovered.add(TvSeason(
+          seasonNumber: seasonNum,
+          name: name,
+          episodeCount: eps.length,
+          airDate: airDate,
+        ));
+      }
+    }
+    return discovered;
   }
 
   Future<List<Episode>> getSeasonEpisodes(int tvId, int seasonNumber) async {

@@ -532,8 +532,9 @@ class _PlayerScreenState extends State<PlayerScreen>
         _controller = controller;
         controller.addListener(_onVideoTick);
         _duration.value = controller.value.duration;
-        if (startAt != null && startAt > Duration.zero) {
-          await controller.seekTo(startAt);
+        final resumeAt = startAt ?? _resumePosition();
+        if (resumeAt > Duration.zero) {
+          await controller.seekTo(resumeAt);
         }
         await controller.play();
         _playing.value = true;

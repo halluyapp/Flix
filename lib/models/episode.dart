@@ -6,6 +6,7 @@ class Episode {
   final String? stillPath;
   final double voteAverage;
   final int runtime;
+  final String airDate;
 
   Episode({
     required this.episodeNumber,
@@ -15,6 +16,7 @@ class Episode {
     this.stillPath,
     required this.voteAverage,
     required this.runtime,
+    this.airDate = '',
   });
 
   factory Episode.fromJson(Map<String, dynamic> json) {
@@ -26,7 +28,36 @@ class Episode {
       stillPath: json['still_path'] as String?,
       voteAverage: (json['vote_average'] as num?)?.toDouble() ?? 0.0,
       runtime: (json['runtime'] as int?) ?? 45,
+      airDate: (json['air_date'] ?? '').toString(),
     );
+  }
+
+  /// Whether this episode has officially aired. Future episodes scheduled on TMDB
+  /// are not yet playable or downloadable from media providers.
+  bool get isReleased {
+    if (airDate.trim().isEmpty) return true;
+    try {
+      final air = DateTime.parse(airDate.trim());
+      final now = DateTime.now();
+      return !air.isAfter(now);
+    } catch (_) {
+      return true;
+    }
+  }
+
+  /// A friendly release badge for upcoming episodes, e.g. "Coming Nov 21".
+  String get releaseBadge {
+    if (isReleased || airDate.trim().isEmpty) return '';
+    try {
+      final air = DateTime.parse(airDate.trim());
+      const months = [
+        'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+        'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+      ];
+      return 'Coming ${months[air.month - 1]} ${air.day}';
+    } catch (_) {
+      return 'Coming Soon';
+    }
   }
 
   String get thumbnail => stillPath != null

@@ -51,3 +51,42 @@ void main() {
     });
   });
 }
+
+  group('TmdbService getSeasons discovery', () {
+    test('probes season endpoints when direct /tv/{id} endpoint is rejected', () async {
+      final client = MockClient((request) async {
+        final path = request.url.queryParameters['path'] ?? '';
+        if (path == '/tv/100') {
+          // Emulate proxy 400 rejection for unsupported root tv endpoint
+          return http.Response(jsonEncode({'error': 'Unsupported catalogue endpoint'}), 400);
+        }
+        if (path == '/tv/100/season/1') {
+          return http.Response(jsonEncode({
+            'season_number': 1,
+            'name': 'Season 1',
+            'air_date': '2025-01-01',
+            'episodes': [{'episode_number': 1}, {'episode_number': 2}],
+          }), 200);
+        }
+        if (path == '/tv/100/season/2') {
+          return http.Response(jsonEncode({
+            'season_number': 2,
+            'name': 'Season 2',
+            'air_date': '2026-01-01',
+            'episodes': [{'episode_number': 1}],
+          }), 200);
+        }
+        return http.Response(jsonEncode({'error': 'Not found'}), 404);
+      });
+      addTearDown(client.close);
+
+      final service = TmdbService(client: client);
+      final seasons = await service.getSeasons(100);
+
+      expect(seasons.length, 2);
+      expect(seasons[0].seasonNumber, 1);
+      expect(seasons[0].episodeCount, 2);
+      expect(seasons[1].seasonNumber, 2);
+      expect(seasons[1].episodeCount, 1);
+    });
+  });
