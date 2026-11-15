@@ -184,6 +184,9 @@ class CaptionTrack {
   /// Canonical language code. Returns an empty string when none is usable.
   static String normalizeLanguage(String? raw) {
     if (raw == null) return '';
+    // Full names such as "English" map to their code before any cleanup.
+    final byName = languageFromName(raw);
+    if (byName.isNotEmpty) return byName;
     var value = raw.trim().toLowerCase().replaceAll('_', '-');
     if (value.isEmpty || value == 'und' || value == 'unknown') return '';
     value = value.replaceAll(RegExp(r'[^a-z0-9-]'), '');
