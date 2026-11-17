@@ -21,6 +21,7 @@ import '../models/stream_source.dart';
 import '../models/tv_season.dart';
 import '../services/diagnostics_service.dart';
 import '../services/episode_navigator.dart';
+import '../services/player_gesture_logic.dart';
 import '../services/source_preference.dart';
 import '../services/stream_resolver.dart';
 import '../services/subtitle_service.dart';
@@ -98,6 +99,11 @@ class _PlayerScreenState extends State<PlayerScreen>
   static const Duration _autoHideDelay = Duration(seconds: 4);
   static const String _autoplayKey = 'flix_player_autoplay_next';
   static const String _subtitleLanguageKey = 'flix_player_subtitle_language';
+  static const String _subtitleSizeKey = 'flix_subtitle_size';
+  static const String _subtitleOpacityKey = 'flix_subtitle_opacity';
+  static const String _subtitlePositionKey = 'flix_subtitle_position';
+  static const String _subtitleColorKey = 'flix_subtitle_color';
+  static const String _subtitleBoldKey = 'flix_subtitle_bold';
 
   final StreamResolver _resolver = StreamResolver();
   final TmdbService _tmdb = TmdbService();
@@ -171,6 +177,17 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _showVolumeIndicator = false;
   Timer? _volumeTimer;
   bool _isPinching = false;
+  double _subtitleSize = 17;
+  double _subtitleOpacity = 0.76;
+  double _subtitlePosition = 34;
+  Color _subtitleColor = Colors.white;
+  bool _subtitleBold = true;
+  bool _isDragSeeking = false;
+  bool _isVerticalAdjusting = false;
+  double _gestureDx = 0;
+  double _gestureDy = 0;
+  Duration? _dragSeekTarget;
+  bool _temporarySpeedActive = false;
 
   @override
   void initState() {
@@ -300,6 +317,11 @@ class _PlayerScreenState extends State<PlayerScreen>
       final prefs = await SharedPreferences.getInstance();
       _autoplayNext = prefs.getBool(_autoplayKey) ?? true;
       _preferredSubtitleLanguage = prefs.getString(_subtitleLanguageKey);
+      _subtitleSize = prefs.getDouble(_subtitleSizeKey) ?? 17;
+      _subtitleOpacity = prefs.getDouble(_subtitleOpacityKey) ?? 0.76;
+      _subtitlePosition = prefs.getDouble(_subtitlePositionKey) ?? 34;
+      _subtitleColor = Color(prefs.getInt(_subtitleColorKey) ?? Colors.white.value);
+      _subtitleBold = prefs.getBool(_subtitleBoldKey) ?? true;
       if (mounted) setState(() {});
     } catch (_) {
       // Defaults are safe when preferences are unavailable.
@@ -331,6 +353,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     Duration? startAt,
   }) async {
     if (_isOffline) return;
+    if (_temporarySpeedActive) unawaited(_endTemporarySpeed());
     final generation = ++_generation;
     _safeSetState(() {
       _phase = _chosenMatch == null &&
@@ -1289,6 +1312,29 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
+  Future<void> _beginTemporarySpeed() async {
+    final controller = _controller;
+    if (_temporarySpeedActive || controller == null || !controller.value.isInitialized) return;
+    _temporarySpeedActive = true;
+    try {
+      await controller.setPlaybackSpeed(2.0);
+      _safeSetState(() {});
+    } catch (_) {
+      _temporarySpeedActive = false;
+    }
+  }
+
+  Future<void> _endTemporarySpeed() async {
+    if (!_temporarySpeedActive) return;
+    _temporarySpeedActive = false;
+    try {
+      await _controller?.setPlaybackSpeed(_speed);
+    } catch (_) {
+      // Source recovery will re-apply the user's persistent speed.
+    }
+    _safeSetState(() {});
+  }
+
   Future<void> _setSpeed(double speed) async {
     _speed = speed;
     try {
@@ -1404,6 +1450,11 @@ class _PlayerScreenState extends State<PlayerScreen>
               mainAxisSize: MainAxisSize.min,
               children: [
                 _sheetHeader(sheetContext, 'Subtitles'),
+                ListTile(
+                  leading: const Icon(Icons.tune, color: Colors.white70),
+                  title: const Text('Subtitle appearance', style: TextStyle(color: Colors.white)),
+                  onTap: () => _openSubtitleAppearance(sheetContext),
+                ),
                 Flexible(
                   child: ListView(
                     shrinkWrap: true,
@@ -1500,6 +1551,77 @@ class _PlayerScreenState extends State<PlayerScreen>
         );
       },
     );
+  }
+
+  Future<void> _openSubtitleAppearance(BuildContext sheetContext) async {
+    await showDialog<void>(
+      context: sheetContext,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, updateDialog) => AlertDialog(
+          backgroundColor: const Color(0xFF202020),
+          title: const Text('Subtitle appearance', style: TextStyle(color: Colors.white)),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+              Text('Size · ${_subtitleSize.round()} px', style: const TextStyle(color: Colors.white70)),
+              Slider(value: _subtitleSize, min: 14, max: 26, divisions: 6, onChanged: (v) {
+                updateDialog(() => _subtitleSize = v);
+                unawaited(_saveSubtitleAppearance());
+              }),
+              Text('Background · ${(_subtitleOpacity * 100).round()}%', style: const TextStyle(color: Colors.white70)),
+              Slider(value: _subtitleOpacity, min: 0, max: 0.9, divisions: 9, onChanged: (v) {
+                updateDialog(() => _subtitleOpacity = v);
+                unawaited(_saveSubtitleAppearance());
+              }),
+              Text('Bottom margin · ${_subtitlePosition.round()} px', style: const TextStyle(color: Colors.white70)),
+              Slider(value: _subtitlePosition, min: 24, max: 140, divisions: 29, onChanged: (v) {
+                updateDialog(() => _subtitlePosition = v);
+                unawaited(_saveSubtitleAppearance());
+              }),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Bold text', style: TextStyle(color: Colors.white70)),
+                value: _subtitleBold,
+                onChanged: (value) { updateDialog(() => _subtitleBold = value); unawaited(_saveSubtitleAppearance()); },
+              ),
+              const Align(alignment: Alignment.centerLeft, child: Text('Text colour', style: TextStyle(color: Colors.white70))),
+              Wrap(spacing: 12, children: [Colors.white, Colors.yellow, Colors.cyan, Colors.lightGreen].map((color) => IconButton(
+                tooltip: 'Subtitle colour',
+                onPressed: () { updateDialog(() => _subtitleColor = color); unawaited(_saveSubtitleAppearance()); },
+                icon: Icon(Icons.circle, color: color, size: 20),
+              )).toList()),
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(color: Colors.black.withOpacity(_subtitleOpacity), borderRadius: BorderRadius.circular(4)),
+                child: Text('Subtitle preview', style: TextStyle(color: _subtitleColor, fontSize: _subtitleSize, fontWeight: _subtitleBold ? FontWeight.w600 : FontWeight.normal, shadows: const [Shadow(color: Colors.black, blurRadius: 3)])),
+              ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () {
+              updateDialog(() { _subtitleSize = 17; _subtitleOpacity = 0.76; _subtitlePosition = 34; _subtitleColor = Colors.white; _subtitleBold = true; });
+              unawaited(_saveSubtitleAppearance());
+            }, child: const Text('Reset')),
+            TextButton(onPressed: () => Navigator.pop(dialogContext), child: const Text('Done')),
+          ],
+        ),
+      ),
+    );
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _saveSubtitleAppearance() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setDouble(_subtitleSizeKey, _subtitleSize);
+      await prefs.setDouble(_subtitleOpacityKey, _subtitleOpacity);
+      await prefs.setDouble(_subtitlePositionKey, _subtitlePosition);
+      await prefs.setInt(_subtitleColorKey, _subtitleColor.value);
+      await prefs.setBool(_subtitleBoldKey, _subtitleBold);
+    } catch (_) {}
   }
 
   Future<void> _openSpeedSheet() async {
@@ -1819,6 +1941,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (_disposed) return;
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive) {
+      unawaited(_endTemporarySpeed());
       _saveProgressNow();
       final controller = _controller;
       if (controller != null && controller.value.isPlaying) {
@@ -1829,6 +1952,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   @override
   void dispose() {
+    unawaited(_endTemporarySpeed());
     _disposed = true;
     _generation++;
     _saveProgressNow();
@@ -1979,7 +2103,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         return Positioned(
           left: 24,
           right: 24,
-          bottom: _showControls ? 112 : 34,
+          bottom: _showControls ? _subtitlePosition + 78 : _subtitlePosition,
           child: IgnorePointer(
             child: Center(
               child: Container(
@@ -1987,17 +2111,17 @@ class _PlayerScreenState extends State<PlayerScreen>
                 padding:
                     const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
                 decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.76),
+                  color: Colors.black.withValues(alpha: _subtitleOpacity),
                   borderRadius: BorderRadius.circular(4),
                 ),
                 child: Text(
                   text,
                   textAlign: TextAlign.center,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 17,
+                  style: TextStyle(
+                    color: _subtitleColor,
+                    fontSize: _subtitleSize,
                     height: 1.28,
-                    fontWeight: FontWeight.w600,
+                    fontWeight: _subtitleBold ? FontWeight.w600 : FontWeight.normal,
                   ),
                 ),
               ),
@@ -2024,12 +2148,66 @@ class _PlayerScreenState extends State<PlayerScreen>
               }
             },
             onDoubleTap: () {},
+            onLongPressStart: (_) => unawaited(_beginTemporarySpeed()),
+            onLongPressEnd: (_) => unawaited(_endTemporarySpeed()),
+            onLongPressCancel: () => unawaited(_endTemporarySpeed()),
             onScaleStart: (details) {
+              _gestureDx = 0;
+              _gestureDy = 0;
+              _isDragSeeking = false;
+              _isVerticalAdjusting = false;
+              _dragSeekTarget = _position.value;
               if (details.pointerCount == 2) {
                 _isPinching = true;
               }
             },
             onScaleUpdate: (details) {
+              if (details.pointerCount == 1 && !_isPinching) {
+                _gestureDx += details.focalPointDelta.dx;
+                _gestureDy += details.focalPointDelta.dy;
+                if (!_isDragSeeking && !_isVerticalAdjusting &&
+                    (_gestureDx.abs() > 12 || _gestureDy.abs() > 12)) {
+                  _isDragSeeking = _gestureDx.abs() > _gestureDy.abs();
+                  _isVerticalAdjusting = !_isDragSeeking;
+                }
+                if (_isDragSeeking) {
+                  final duration = _duration.value;
+                  final width = MediaQuery.of(context).size.width;
+                  if (duration > Duration.zero && width > 0) {
+                    final proposed = PlayerGestureLogic.seekTarget(
+                      start: _position.value,
+                      horizontalDelta: _gestureDx,
+                      screenWidth: width,
+                      duration: duration,
+                    );
+                    _safeSetState(() => _dragSeekTarget = proposed);
+                  }
+                } else if (_isVerticalAdjusting) {
+                  final size = MediaQuery.of(context).size;
+                  final isLeft = details.focalPoint.dx < size.width / 2;
+                  final delta = -details.focalPointDelta.dy / 250;
+                  if (isLeft) {
+                    _safeSetState(() {
+                      _brightness = (_brightness + delta).clamp(0.15, 1.0);
+                      _showBrightnessIndicator = true;
+                    });
+                    _brightnessTimer?.cancel();
+                    _brightnessTimer = Timer(const Duration(milliseconds: 1500), () {
+                      if (mounted) _safeSetState(() => _showBrightnessIndicator = false);
+                    });
+                  } else {
+                    _safeSetState(() {
+                      _volume = (_volume + delta).clamp(0.0, 1.0);
+                      _showVolumeIndicator = true;
+                    });
+                    _controller?.setVolume(_volume);
+                    _volumeTimer?.cancel();
+                    _volumeTimer = Timer(const Duration(milliseconds: 1500), () {
+                      if (mounted) _safeSetState(() => _showVolumeIndicator = false);
+                    });
+                  }
+                }
+              }
               if (details.pointerCount == 2 && _isPinching) {
                 if (details.scale > 1.18 && _aspectRatioMode != VideoAspectRatioMode.fill) {
                   _safeSetState(() {
@@ -2055,35 +2233,50 @@ class _PlayerScreenState extends State<PlayerScreen>
               }
             },
             onScaleEnd: (details) {
-              _isPinching = false;
-            },
-            onVerticalDragUpdate: (details) {
-              final size = MediaQuery.of(context).size;
-              final isLeft = details.globalPosition.dx < size.width / 2;
-              final delta = -details.delta.dy / 250;
-              if (isLeft) {
-                _safeSetState(() {
-                  _brightness = (_brightness + delta).clamp(0.15, 1.0);
-                  _showBrightnessIndicator = true;
-                });
-                _brightnessTimer?.cancel();
-                _brightnessTimer = Timer(const Duration(milliseconds: 1500), () {
-                  if (mounted) _safeSetState(() => _showBrightnessIndicator = false);
-                });
-              } else {
-                _safeSetState(() {
-                  _volume = (_volume + delta).clamp(0.0, 1.0);
-                  _showVolumeIndicator = true;
-                });
-                _controller?.setVolume(_volume);
-                _volumeTimer?.cancel();
-                _volumeTimer = Timer(const Duration(milliseconds: 1500), () {
-                  if (mounted) _safeSetState(() => _showVolumeIndicator = false);
-                });
+              if (_isDragSeeking && _dragSeekTarget != null) {
+                _seekTo(_dragSeekTarget!);
               }
+              _isPinching = false;
+              _isDragSeeking = false;
+              _isVerticalAdjusting = false;
+              _safeSetState(() => _dragSeekTarget = null);
             },
           ),
         ),
+        if (_temporarySpeedActive)
+          Positioned(
+            top: 28,
+            left: 0,
+            right: 0,
+            child: IgnorePointer(
+              child: Center(
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+                  decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(20)),
+                  child: const Text('2× SPEED', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
+                ),
+              ),
+            ),
+          ),
+        if (_isDragSeeking && _dragSeekTarget != null)
+          Center(
+            child: IgnorePointer(
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                decoration: BoxDecoration(
+                  color: Colors.black.withOpacity(0.78),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(_gestureDx >= 0 ? Icons.fast_forward : Icons.fast_rewind,
+                      color: Colors.white, size: 28),
+                  const SizedBox(height: 6),
+                  Text('${_formatDuration(_dragSeekTarget!)}  ${_gestureDx >= 0 ? '+' : '−'}${(_dragSeekTarget!.inSeconds - _position.value.inSeconds).abs()}s',
+                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
+                ]),
+              ),
+            ),
+          ),
         if (_showControls && !_locked)
           Positioned(
             left: 0,
@@ -2395,7 +2588,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                 ),
                 _hudIcon(
                   icon: Icons.subtitles_outlined,
-                  tooltip: 'Audio and subtitles',
+                  tooltip: 'Subtitles',
                   onPressed: () => unawaited(_openSubtitleSheet()),
                 ),
                 _hudIcon(
@@ -2557,7 +2750,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                   ),
                 _bottomAction(
                   icon: Icons.subtitles_outlined,
-                  label: 'Audio & Subtitles',
+                  label: 'Subtitles',
                   onPressed: () => unawaited(_openSubtitleSheet()),
                 ),
                 if (widget.item.mediaType == 'tv' &&
