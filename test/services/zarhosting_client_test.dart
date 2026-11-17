@@ -133,6 +133,44 @@ void main() {
       expect(calls, 1);
     });
 
+    test('keeps the 401 status so an expired caption link can be told apart',
+        () async {
+      final mock = MockClient((_) async => http.Response('{}', 401));
+      addTearDown(mock.close);
+
+      await expectLater(
+        _client(mock).getJson(
+          '/stream/1/captions',
+          kind: ProviderRequestKind.captions,
+        ),
+        throwsA(
+          isA<ProviderException>().having(
+            (error) => error.statusCode,
+            'statusCode',
+            401,
+          ),
+        ),
+      );
+    });
+
+    test('a caption lookup honours maxAttempts and stops early', () async {
+      var calls = 0;
+      final mock = MockClient((_) async {
+        calls++;
+        return http.Response('upstream down', 503);
+      });
+      addTearDown(mock.close);
+
+      await expectLater(
+        _client(mock, maxAttempts: 2).getJson(
+          '/stream/1/captions',
+          kind: ProviderRequestKind.captions,
+        ),
+        throwsA(isA<ProviderException>()),
+      );
+      expect(calls, 2);
+    });
+
     test('maps a malformed JSON body to invalidProviderResponse', () async {
       final mock = MockClient((_) async => http.Response('not json', 200));
       addTearDown(mock.close);

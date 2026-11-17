@@ -290,8 +290,17 @@ void main() {
       subtitleLanguages: const {'en'},
     );
 
-    expect(job.subtitles, isEmpty);
     expect(job.subtitleLanguages, ['en']);
+    expect(engine.requests, hasLength(1));
+
+    await service.pendingSubtitleWork;
+    // The insecure subtitle link is refused, so the language is recorded as
+    // missing with a reason, and the completed video is left untouched.
+    final stored = service.downloads.firstWhere((entry) => entry.key == job.key);
+    expect(stored.subtitles, isEmpty);
+    expect(stored.subtitleIssues.keys, ['en']);
+    expect(stored.missingSubtitleLanguages, ['en']);
+    expect(stored.filePath, job.filePath);
     expect(engine.requests, hasLength(1));
   });
 

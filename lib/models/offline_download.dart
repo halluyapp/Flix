@@ -49,6 +49,11 @@ class OfflineDownload {
   /// does not need the video to be downloaded again.
   final List<String> subtitleLanguages;
 
+  /// Why a selected language is not saved, keyed by language code. Stored so
+  /// the library can show it and a retry can be offered without re-downloading
+  /// the video. Empty when every selected subtitle is saved.
+  final Map<String, String> subtitleIssues;
+
   /// pending | running | paused | completed | failed | cancelled | corrupt
   final String status;
   final int downloadedBytes;
@@ -77,6 +82,7 @@ class OfflineDownload {
     required this.filePath,
     required this.subtitles,
     this.subtitleLanguages = const [],
+    this.subtitleIssues = const {},
     required this.status,
     required this.downloadedBytes,
     required this.totalBytes,
@@ -125,12 +131,35 @@ class OfflineDownload {
 
   String get downloadIdentity => '${mediaIdentity}_$qualityValue';
 
+  /// Selected subtitle languages that have no saved file.
+  List<String> get missingSubtitleLanguages {
+    final saved = subtitles
+        .where((subtitle) => subtitle.isUsable)
+        .map((subtitle) => subtitle.language)
+        .toSet();
+    return subtitleLanguages
+        .where((language) => !saved.contains(language))
+        .toList(growable: false);
+  }
+
+  /// True for a finished video whose selected subtitles are not all saved.
+  bool get hasMissingSubtitles =>
+      isComplete && missingSubtitleLanguages.isNotEmpty;
+
   String get subtitleSummary {
-    if (subtitles.isEmpty) return 'No subtitles saved';
-    return subtitles
+    if (subtitles.isEmpty) {
+      return subtitleLanguages.isEmpty
+          ? 'No subtitles saved'
+          : 'Subtitles not saved';
+    }
+    final names = subtitles
+        .where((subtitle) => subtitle.isUsable)
         .map((subtitle) => subtitle.languageName)
         .toSet()
         .join(', ');
+    final missing = missingSubtitleLanguages.length;
+    if (missing == 0) return names.isEmpty ? 'No subtitles saved' : names;
+    return names.isEmpty ? '$missing missing' : '$names · $missing missing';
   }
 
   String get statusLabel => switch (status) {
@@ -149,6 +178,7 @@ class OfflineDownload {
     String? filePath,
     List<OfflineSubtitle>? subtitles,
     List<String>? subtitleLanguages,
+    Map<String, String>? subtitleIssues,
     String? status,
     int? downloadedBytes,
     int? totalBytes,
@@ -172,6 +202,7 @@ class OfflineDownload {
         filePath: filePath ?? this.filePath,
         subtitles: subtitles ?? this.subtitles,
         subtitleLanguages: subtitleLanguages ?? this.subtitleLanguages,
+        subtitleIssues: subtitleIssues ?? this.subtitleIssues,
         status: status ?? this.status,
         downloadedBytes: downloadedBytes ?? this.downloadedBytes,
         totalBytes: totalBytes ?? this.totalBytes,
@@ -197,6 +228,7 @@ class OfflineDownload {
         'filePath': filePath,
         'subtitles': subtitles.map((subtitle) => subtitle.toJson()).toList(),
         'subtitleLanguages': subtitleLanguages,
+        'subtitleIssues': subtitleIssues,
         'status': status,
         'downloadedBytes': downloadedBytes,
         'totalBytes': totalBytes,
@@ -208,6 +240,14 @@ class OfflineDownload {
         'verified': verified,
         'format': format,
       };
+
+  static Map<String, String> _issuesFrom(dynamic raw) {
+    if (raw is! Map) return const {};
+    return {
+      for (final entry in raw.entries)
+        entry.key.toString(): entry.value.toString(),
+    };
+  }
 
   factory OfflineDownload.fromJson(Map<String, dynamic> json) {
     final rawItem = json['item'];
@@ -236,6 +276,7 @@ class OfflineDownload {
       subtitleLanguages: rawLanguages is List
           ? rawLanguages.map((value) => value.toString()).toList()
           : const [],
+      subtitleIssues: _issuesFrom(json['subtitleIssues']),
       status: (json['status'] ?? 'unknown').toString(),
       downloadedBytes: (json['downloadedBytes'] as num?)?.toInt() ?? 0,
       totalBytes: (json['totalBytes'] as num?)?.toInt() ?? 0,

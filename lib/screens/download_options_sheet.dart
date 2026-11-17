@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 
 import '../core/provider/provider_failures.dart';
 import '../core/provider/provider_messages.dart';
+import '../models/caption_load.dart';
 import '../models/caption_track.dart';
 import '../models/episode.dart';
 import '../models/media_item.dart';
@@ -226,6 +227,7 @@ class _DownloadOptionsSheetState extends State<DownloadOptionsSheet> {
     final sources = stream?.downloadSources ?? const <StreamSource>[];
     final streamingOnly = stream?.streamingOnlySources ?? const <StreamSource>[];
     final captions = stream?.captions ?? const <CaptionTrack>[];
+    final captionLoad = stream?.captionLoad;
     final failure = _failure;
 
     return SingleChildScrollView(
@@ -364,12 +366,17 @@ class _DownloadOptionsSheetState extends State<DownloadOptionsSheet> {
               ],
             ),
             if (captions.isEmpty)
-              const Padding(
-                padding: EdgeInsets.only(bottom: 6),
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
                 child: Text(
-                  'No downloadable subtitle was found for this title. The video '
-                  'can still be downloaded.',
-                  style: TextStyle(color: Colors.white54, fontSize: 12.5),
+                  // A failed or unreadable lookup is never presented as
+                  // "this title has no subtitles".
+                  captionLoad == null ||
+                          captionLoad.status == CaptionLoadStatus.empty
+                      ? 'No downloadable subtitle was found for this title. The video '
+                          'can still be downloaded.'
+                      : '${captionLoad.userMessage} The video can still be downloaded.',
+                  style: const TextStyle(color: Colors.white54, fontSize: 12.5),
                 ),
               )
             else
@@ -394,7 +401,7 @@ class _DownloadOptionsSheetState extends State<DownloadOptionsSheet> {
                     style: const TextStyle(color: Colors.white),
                   ),
                   subtitle: Text(
-                    caption.extension.toUpperCase(),
+                    caption.extension.isEmpty ? '?' : caption.extension.toUpperCase(),
                     style:
                         const TextStyle(color: Colors.white38, fontSize: 11),
                   ),
