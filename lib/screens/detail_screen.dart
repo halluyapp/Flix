@@ -104,6 +104,17 @@ class _DetailScreenState extends State<DetailScreen> {
   }
 
   Future<void> _openEpisodeDownload(Episode episode) async {
+    if (!episode.isReleased) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '${episode.name} is not yet released and cannot be downloaded.',
+          ),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+      return;
+    }
     final started = await showModalBottomSheet<bool>(
       context: context,
       isScrollControlled: true,

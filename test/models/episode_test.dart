@@ -34,5 +34,24 @@ void main() {
       expect(ep.isReleased, isTrue);
       expect(ep.releaseBadge, isEmpty);
     });
+
+    test('filters unreleased episodes from download batches', () {
+      final released = Episode.fromJson({
+        'episode_number': 1,
+        'season_number': 1,
+        'name': 'Episode 1',
+        'air_date': '2024-01-01',
+      });
+      final unreleased = Episode.fromJson({
+        'episode_number': 12,
+        'season_number': 1,
+        'name': 'Episode 12',
+        'air_date': '2029-01-01',
+      });
+      final episodes = [released, unreleased];
+      final downloadable = episodes.where((e) => e.isReleased).toList();
+      expect(downloadable.length, equals(1));
+      expect(downloadable.first.episodeNumber, equals(1));
+    });
   });
 }

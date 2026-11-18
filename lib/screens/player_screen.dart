@@ -569,6 +569,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         final resumeAt = startAt ?? _resumePosition();
         if (resumeAt > Duration.zero) {
           await controller.seekTo(resumeAt);
+          _showMessage('Resumed at ${_formatDuration(resumeAt)}');
         }
         await controller.play();
         _playing.value = true;
@@ -621,6 +622,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         final resumeAt = startAt ?? _resumePosition();
         if (resumeAt > Duration.zero) {
           await controller.seekTo(resumeAt);
+          _showMessage('Resumed at ${_formatDuration(resumeAt)}');
         }
         await controller.play();
 
@@ -1314,7 +1316,12 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   Future<void> _beginTemporarySpeed() async {
     final controller = _controller;
-    if (_temporarySpeedActive || controller == null || !controller.value.isInitialized) return;
+    if (_temporarySpeedActive ||
+        controller == null ||
+        !controller.value.isInitialized ||
+        !controller.value.isPlaying) {
+      return;
+    }
     _temporarySpeedActive = true;
     try {
       await controller.setPlaybackSpeed(2.0);
@@ -2122,6 +2129,9 @@ class _PlayerScreenState extends State<PlayerScreen>
                     fontSize: _subtitleSize,
                     height: 1.28,
                     fontWeight: _subtitleBold ? FontWeight.w600 : FontWeight.normal,
+                    shadows: const [
+                      Shadow(color: Colors.black, blurRadius: 3),
+                    ],
                   ),
                 ),
               ),

@@ -653,14 +653,18 @@ class _SeasonDownloadSheetState extends State<SeasonDownloadSheet> {
           season: widget.season.seasonNumber,
           episode: episode.episodeNumber,
         );
-        if (existing != null) {
+        if (!episode.isReleased) {
+          _status[episode.episodeNumber] = episode.releaseBadge.isNotEmpty
+              ? episode.releaseBadge
+              : 'Unreleased';
+        } else if (existing != null) {
           _status[episode.episodeNumber] = existing.isComplete
               ? 'Downloaded'
               : existing.isProcessing
                   ? 'Downloading'
                   : 'Failed';
         }
-        if (existing == null || existing.isFailed) {
+        if (episode.isReleased && (existing == null || existing.isFailed)) {
           _selected.add(episode.episodeNumber);
         }
       }
@@ -683,6 +687,7 @@ class _SeasonDownloadSheetState extends State<SeasonDownloadSheet> {
 
     for (final episode in widget.episodes) {
       if (_cancelRequested) break;
+      if (!episode.isReleased) continue;
       if (!_selected.contains(episode.episodeNumber)) continue;
       final existing = service.downloadStateFor(
         widget.item,
@@ -836,8 +841,9 @@ class _SeasonDownloadSheetState extends State<SeasonDownloadSheet> {
                                   _selected.addAll(
                                     widget.episodes
                                         .where((episode) =>
+                                            episode.isReleased &&
                                             _status[episode.episodeNumber] !=
-                                            'Downloaded')
+                                                'Downloaded')
                                         .map((episode) => episode.episodeNumber),
                                   );
                                 }),
@@ -868,13 +874,15 @@ class _SeasonDownloadSheetState extends State<SeasonDownloadSheet> {
                         final episode = widget.episodes[index];
                         final status = _status[episode.episodeNumber];
                         final isDone = status == 'Downloaded';
+                        final isUnreleased = !episode.isReleased;
+                        final isDisabled = _running || isDone || isUnreleased;
                         return CheckboxListTile(
                           dense: true,
                           contentPadding: EdgeInsets.zero,
                           activeColor: _accent,
                           checkColor: Colors.white,
                           value: _selected.contains(episode.episodeNumber),
-                          onChanged: _running || isDone
+                          onChanged: isDisabled
                               ? null
                               : (checked) => setState(() {
                                     if (checked == true) {
@@ -887,8 +895,8 @@ class _SeasonDownloadSheetState extends State<SeasonDownloadSheet> {
                             '${episode.episodeNumber}. ${episode.name}',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: Colors.white,
+                            style: TextStyle(
+                              color: isUnreleased ? Colors.white38 : Colors.white,
                               fontSize: 13.5,
                             ),
                           ),
@@ -901,7 +909,9 @@ class _SeasonDownloadSheetState extends State<SeasonDownloadSheet> {
                                   style: TextStyle(
                                     color: isDone
                                         ? const Color(0xFF46D369)
-                                        : Colors.white54,
+                                        : isUnreleased
+                                            ? Colors.white38
+                                            : Colors.white54,
                                     fontSize: 11.5,
                                   ),
                                 ),
