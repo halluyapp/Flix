@@ -43,11 +43,18 @@ android {
         versionName flutterVersionName
     }
 
+    signingConfigs {
+        release {
+            storeFile file("flix.keystore")
+            storePassword "flixandroid"
+            keyAlias "flix"
+            keyPassword "flixandroid"
+        }
+    }
+
     buildTypes {
         release {
-            // Signed with the debug key so CI can produce installable APKs.
-            // Replace with a real release keystore before store distribution.
-            signingConfig signingConfigs.debug
+            signingConfig signingConfigs.release
             minifyEnabled false
             shrinkResources false
         }
