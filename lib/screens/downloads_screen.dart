@@ -193,12 +193,23 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
       );
       return;
     }
+    final userState = context.read<UserStateService>();
+    final saved = userState.progressFor(
+      job.item,
+      season: job.season,
+      episode: job.episode,
+    );
+    final startAt = (saved != null && !saved.isCompleted && saved.positionSeconds > 5)
+        ? Duration(seconds: saved.positionSeconds)
+        : null;
+
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => PlayerScreen(
           item: job.item,
           startSeason: job.season,
           startEpisode: job.episode,
+          startAt: startAt,
           offlineFilePath: job.filePath,
           offlineSubtitles: job.subtitles,
         ),

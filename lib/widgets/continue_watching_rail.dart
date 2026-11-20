@@ -45,6 +45,7 @@ class ContinueWatchingRail extends StatelessWidget {
                         item: progress.item,
                         startSeason: progress.season,
                         startEpisode: progress.episode,
+                        startAt: Duration(seconds: progress.positionSeconds),
                       ),
                     ),
                   );

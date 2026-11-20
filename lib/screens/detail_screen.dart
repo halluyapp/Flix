@@ -183,10 +183,40 @@ class _DetailScreenState extends State<DetailScreen> {
       return;
     }
 
-    final season = episode?.seasonNumber ??
-        (_isSeries ? _selectedSeason : 0);
-    final episodeNumber = episode?.episodeNumber ??
-        (_isSeries && _episodes.isNotEmpty ? _episodes.first.episodeNumber : 0);
+    final userState = context.read<UserStateService>();
+    int season;
+    int episodeNumber;
+    Duration? startAt;
+
+    if (episode != null) {
+      season = episode.seasonNumber;
+      episodeNumber = episode.episodeNumber;
+      final saved = userState.progressFor(
+        widget.item,
+        season: season,
+        episode: episodeNumber,
+      );
+      if (saved != null && !saved.isCompleted && saved.positionSeconds > 5) {
+        startAt = Duration(seconds: saved.positionSeconds);
+      }
+    } else if (_isSeries) {
+      final latest = userState.latestProgressFor(widget.item);
+      if (latest != null && !latest.isCompleted && latest.positionSeconds > 5) {
+        season = latest.season;
+        episodeNumber = latest.episode;
+        startAt = Duration(seconds: latest.positionSeconds);
+      } else {
+        season = _selectedSeason;
+        episodeNumber = _episodes.isNotEmpty ? _episodes.first.episodeNumber : 1;
+      }
+    } else {
+      season = 0;
+      episodeNumber = 0;
+      final saved = userState.progressFor(widget.item);
+      if (saved != null && !saved.isCompleted && saved.positionSeconds > 5) {
+        startAt = Duration(seconds: saved.positionSeconds);
+      }
+    }
 
     final downloadService = context.read<DownloadService>();
     final offline = downloadService.downloadStateFor(
@@ -204,6 +234,7 @@ class _DetailScreenState extends State<DetailScreen> {
           item: widget.item,
           startSeason: season > 0 ? season : 1,
           startEpisode: episodeNumber > 0 ? episodeNumber : 1,
+          startAt: startAt,
           offlineFilePath: hasOfflineFile ? offline.filePath : null,
           offlineSubtitles: hasOfflineFile ? offline.subtitles : const [],
         ),
@@ -334,31 +365,69 @@ class _DetailScreenState extends State<DetailScreen> {
                     ],
                   ),
                   const SizedBox(height: 14),
-                  SizedBox(
-                    width: double.infinity,
-                    height: 44,
-                    child: ElevatedButton.icon(
-                      onPressed: () => _play(),
-                      icon: const Icon(
-                        Icons.play_arrow,
-                        color: Colors.black,
-                        size: 26,
-                      ),
-                      label: const Text(
-                        'Play',
-                        style: TextStyle(
-                          color: Colors.black,
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.white,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                      ),
-                    ),
+                  Builder(
+                    builder: (context) {
+                      final progress = _isSeries
+                          ? userState.latestProgressFor(widget.item)
+                          : userState.progressFor(widget.item);
+                      final hasResume = progress != null &&
+                          !progress.isCompleted &&
+                          progress.positionSeconds > 5;
+                      final resumeLabel = hasResume
+                          ? (_isSeries
+                              ? 'Resume S${progress.season}:E${progress.episode}'
+                              : 'Resume')
+                          : 'Play';
+                      final progressFraction = hasResume && progress.durationSeconds > 0
+                          ? (progress.positionSeconds / progress.durationSeconds).clamp(0.0, 1.0)
+                          : 0.0;
+
+                      return Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          SizedBox(
+                            width: double.infinity,
+                            height: 44,
+                            child: ElevatedButton.icon(
+                              onPressed: () => _play(),
+                              icon: const Icon(
+                                Icons.play_arrow,
+                                color: Colors.black,
+                                size: 26,
+                              ),
+                              label: Text(
+                                resumeLabel,
+                                style: const TextStyle(
+                                  color: Colors.black,
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.white,
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                              ),
+                            ),
+                          ),
+                          if (hasResume && progressFraction > 0) ...[
+                            const SizedBox(height: 4),
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(2),
+                              child: LinearProgressIndicator(
+                                value: progressFraction,
+                                minHeight: 3,
+                                backgroundColor: Colors.white24,
+                                valueColor: const AlwaysStoppedAnimation<Color>(
+                                  Color(0xFFE50914),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
+                      );
+                    },
                   ),
                   const SizedBox(height: 8),
                   SizedBox(

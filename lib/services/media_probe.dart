@@ -44,7 +44,7 @@ class MediaProbeResult {
 class MediaProbe {
   MediaProbe({
     http.Client? client,
-    this.timeout = const Duration(seconds: 7),
+    this.timeout = const Duration(seconds: 3),
     this.retryDelay = const Duration(milliseconds: 1200),
   })  : _client = client ?? http.Client(),
         _ownsClient = client == null;

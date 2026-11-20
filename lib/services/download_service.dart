@@ -266,33 +266,6 @@ class DownloadService extends ChangeNotifier {
       }
     }
     if (probe.blocked) {
-      // Signed links expire and the CDN rate-limits bursts: give it a moment,
-      // then ask the provider for a new link before failing this download.
-      await Future<void>.delayed(const Duration(milliseconds: 1500));
-      _resolver.invalidate(
-        item: item,
-        season: effectiveSeason,
-        episode: effectiveEpisode,
-      );
-      final fresh = await _resolver.resolve(
-        item: item,
-        season: effectiveSeason,
-        episode: effectiveEpisode,
-        forceRefresh: true,
-      );
-      if (fresh.isSuccess) {
-        effective = fresh.stream!;
-        for (final candidate in effective.downloadSources) {
-          final again = await _probe.check(candidate);
-          if (!again.blocked) {
-            chosen = candidate;
-            probe = again;
-            break;
-          }
-        }
-      }
-    }
-    if (probe.blocked) {
       throw MediaUnavailableException(probe.statusCode);
     }
 

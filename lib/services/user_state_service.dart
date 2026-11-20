@@ -256,7 +256,19 @@ class UserStateService extends ChangeNotifier {
     notifyListeners();
   }
 
-  WatchProgress? progressFor(MediaItem item, {int season = 1, int episode = 1}) {
+  WatchProgress? latestProgressFor(MediaItem item) {
+    for (final w in _continueWatching) {
+      if (w.item.id == item.id && w.item.mediaType == item.mediaType) {
+        return w;
+      }
+    }
+    return null;
+  }
+
+  WatchProgress? progressFor(MediaItem item, {int season = 0, int episode = 0}) {
+    if (item.mediaType == 'tv' && (season <= 0 || episode <= 0)) {
+      return latestProgressFor(item);
+    }
     for (final w in _continueWatching) {
       if (w.item.id == item.id && w.item.mediaType == item.mediaType) {
         if (item.mediaType == 'tv' && (w.season != season || w.episode != episode)) {

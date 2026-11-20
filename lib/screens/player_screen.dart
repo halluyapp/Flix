@@ -76,6 +76,7 @@ class PlayerScreen extends StatefulWidget {
   final ProviderMatch? providerMatch;
   final int startSeason;
   final int startEpisode;
+  final Duration? startAt;
   final String? offlineFilePath;
   final List<OfflineSubtitle> offlineSubtitles;
 
@@ -85,6 +86,7 @@ class PlayerScreen extends StatefulWidget {
     this.providerMatch,
     this.startSeason = 1,
     this.startEpisode = 1,
+    this.startAt,
     this.offlineFilePath,
     this.offlineSubtitles = const [],
   });
@@ -120,6 +122,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   Timer? _controlsTimer;
   Timer? _progressTimer;
   Timer? _nextPromptTimer;
+  Timer? _longPressTimer;
+  Offset? _pointerDownPos;
   int _generation = 0;
   bool _disposed = false;
   int _profileIndex = 0;
@@ -429,7 +433,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     var started = await _initializeController(
       first,
       generation,
-      startAt: startAt,
+      startAt: startAt ?? widget.startAt,
     );
     if (!_isCurrent(generation)) return;
 
@@ -684,7 +688,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Duration _resumePosition() {
-    final saved = _userState?.progressFor(
+    final userState = _userState ??
+        (mounted ? Provider.of<UserStateService>(context, listen: false) : null);
+    final saved = userState?.progressFor(
       widget.item,
       season: _currentSeason,
       episode: _currentEpisode,
@@ -774,7 +780,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   void _startProgressTimer() {
     _progressTimer?.cancel();
-    _progressTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+    _progressTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       final controller = _controller;
       if (controller == null || !controller.value.isInitialized) return;
       _saveProgress(
@@ -785,9 +791,10 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _saveProgress(int positionSeconds, int durationSeconds) {
-    if (_disposed) return;
     if (positionSeconds <= 0 || durationSeconds <= 0) return;
-    _userState?.updateProgress(
+    final userState = _userState ??
+        (mounted ? Provider.of<UserStateService>(context, listen: false) : null);
+    userState?.updateProgress(
       item: widget.item,
       season: widget.item.mediaType == 'tv' ? _currentSeason : 1,
       episode: widget.item.mediaType == 'tv' ? _currentEpisode : 1,
@@ -799,11 +806,13 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   void _saveProgressNow() {
     final controller = _controller;
-    if (controller == null || !controller.value.isInitialized) return;
-    _saveProgress(
-      controller.value.position.inSeconds,
-      controller.value.duration.inSeconds,
-    );
+    final pos = (controller != null && controller.value.isInitialized)
+        ? controller.value.position.inSeconds
+        : _position.value.inSeconds;
+    final dur = (controller != null && controller.value.isInitialized)
+        ? controller.value.duration.inSeconds
+        : _duration.value.inSeconds;
+    _saveProgress(pos, dur);
   }
 
   // --------------------------------------------------------------- recovery
@@ -1318,16 +1327,16 @@ class _PlayerScreenState extends State<PlayerScreen>
     final controller = _controller;
     if (_temporarySpeedActive ||
         controller == null ||
-        !controller.value.isInitialized ||
-        !controller.value.isPlaying) {
+        !controller.value.isInitialized) {
       return;
     }
     _temporarySpeedActive = true;
+    _safeSetState(() {});
     try {
       await controller.setPlaybackSpeed(2.0);
-      _safeSetState(() {});
     } catch (_) {
       _temporarySpeedActive = false;
+      _safeSetState(() {});
     }
   }
 
@@ -1960,9 +1969,10 @@ class _PlayerScreenState extends State<PlayerScreen>
   @override
   void dispose() {
     unawaited(_endTemporarySpeed());
+    _longPressTimer?.cancel();
+    _saveProgressNow();
     _disposed = true;
     _generation++;
-    _saveProgressNow();
     _controlsTimer?.cancel();
     _progressTimer?.cancel();
     _nextPromptTimer?.cancel();
