@@ -213,7 +213,11 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (widget.item.mediaType == 'tv') {
         unawaited(_loadEpisodeIndex());
       }
-      unawaited(_startPlayback());
+      // The explicitly supplied startAt (e.g. a Continue Watching tap) is
+      // honored once, only for the first load. Every later start — episode
+      // switches, autoplay, source recovery — resumes from the current
+      // episode's saved progress.
+      unawaited(_startPlayback(startAt: widget.startAt));
     }
   }
 
@@ -433,7 +437,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     var started = await _initializeController(
       first,
       generation,
-      startAt: startAt ?? widget.startAt,
+      startAt: startAt,
     );
     if (!_isCurrent(generation)) return;
 
@@ -465,7 +469,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (!forceRefresh) {
         await _startPlayback(
           forceRefresh: true,
-          startAt: startAt ?? _position.value,
+          startAt: _currentPositionStart(),
         );
         return;
       }
@@ -701,6 +705,20 @@ class _PlayerScreenState extends State<PlayerScreen>
     return Duration.zero;
   }
 
+  /// The position playback was interrupted at, when a retry or recovery should
+  /// resume exactly where it stopped. Null when nothing meaningful was played
+  /// yet (callers then fall back to the saved position).
+  Duration? _currentPositionStart() {
+    final position = _position.value;
+    if (position > Duration.zero) return position;
+    final controller = _controller;
+    if (controller != null && controller.value.isInitialized) {
+      final controllerPosition = controller.value.position;
+      if (controllerPosition > Duration.zero) return controllerPosition;
+    }
+    return null;
+  }
+
   // ------------------------------------------------------------- video ticks
 
   void _onVideoTick() {
@@ -725,7 +743,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     final seconds = value.position.inSeconds;
     if (seconds > 0 && (seconds - _lastSavedSecond).abs() >= 10) {
       _lastSavedSecond = seconds;
-      _saveProgress(value.position.inSeconds, value.duration.inSeconds);
+      unawaited(_saveProgress(value.position.inSeconds, value.duration.inSeconds));
     }
 
     _maybeOfferNextEpisode(value);
@@ -734,7 +752,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   void _maybeMarkEnded(VideoPlayerValue value) {
     if (_phase != _PlayerPhase.ready || !value.isCompleted) return;
-    _saveProgress(value.duration.inSeconds, value.duration.inSeconds);
+    unawaited(_saveProgress(value.duration.inSeconds, value.duration.inSeconds));
     _safeSetState(() => _phase = _PlayerPhase.ended);
     _maybeOfferNextEpisode(value, force: true);
   }
@@ -783,28 +801,34 @@ class _PlayerScreenState extends State<PlayerScreen>
     _progressTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       final controller = _controller;
       if (controller == null || !controller.value.isInitialized) return;
-      _saveProgress(
+      unawaited(_saveProgress(
         controller.value.position.inSeconds,
         controller.value.duration.inSeconds,
-      );
+      ));
     });
   }
 
-  void _saveProgress(int positionSeconds, int durationSeconds) {
+  Future<void> _saveProgress(int positionSeconds, int durationSeconds) async {
     if (positionSeconds <= 0 || durationSeconds <= 0) return;
     final userState = _userState ??
         (mounted ? Provider.of<UserStateService>(context, listen: false) : null);
-    userState?.updateProgress(
-      item: widget.item,
-      season: widget.item.mediaType == 'tv' ? _currentSeason : 1,
-      episode: widget.item.mediaType == 'tv' ? _currentEpisode : 1,
-      episodeTitle: _episodeNameFor(_currentSeason, _currentEpisode),
-      positionSeconds: positionSeconds,
-      durationSeconds: durationSeconds,
-    );
+    // Awaiting the service is what makes a save durable: the SharedPreferences
+    // write completes before the app is suspended or killed.
+    try {
+      await userState?.updateProgress(
+        item: widget.item,
+        season: widget.item.mediaType == 'tv' ? _currentSeason : 1,
+        episode: widget.item.mediaType == 'tv' ? _currentEpisode : 1,
+        episodeTitle: _episodeNameFor(_currentSeason, _currentEpisode),
+        positionSeconds: positionSeconds,
+        durationSeconds: durationSeconds,
+      );
+    } catch (_) {
+      // A failed save is best-effort; the next save retries with fresh data.
+    }
   }
 
-  void _saveProgressNow() {
+  Future<void> _saveProgressNow() async {
     final controller = _controller;
     final pos = (controller != null && controller.value.isInitialized)
         ? controller.value.position.inSeconds
@@ -812,7 +836,17 @@ class _PlayerScreenState extends State<PlayerScreen>
     final dur = (controller != null && controller.value.isInitialized)
         ? controller.value.duration.inSeconds
         : _duration.value.inSeconds;
-    _saveProgress(pos, dur);
+    await _saveProgress(pos, dur);
+  }
+
+  /// Saves and bounds the wait so an app exit or a background transition can
+  /// never hang on a stalled storage channel.
+  Future<void> _flushProgress() async {
+    try {
+      await _saveProgressNow().timeout(const Duration(seconds: 3));
+    } catch (_) {
+      // Never let a slow storage write block the app from backgrounding.
+    }
   }
 
   // --------------------------------------------------------------- recovery
@@ -895,7 +929,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         isPreview: false,
       ),
       generation,
-      startAt: Duration.zero,
+      startAt: widget.startAt,
     );
     if (!started && _isCurrent(generation)) {
       _safeSetState(() {
@@ -1205,7 +1239,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         _loadingEpisodes = false;
       }
       if (!mounted || _disposed) return;
-      _saveProgressNow();
+      await _saveProgressNow();
       _dismissNextPrompt();
       setState(() {
         _currentSeason = next.season;
@@ -1227,7 +1261,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   Future<void> _playEpisode(int season, int episode) async {
     if (season == _currentSeason && episode == _currentEpisode) return;
-    _saveProgressNow();
+    await _saveProgressNow();
     _dismissNextPrompt();
     if (!_episodeIndex.containsKey(season)) await _ensureSeasonEpisodes(season);
     if (!mounted || _disposed) return;
@@ -1275,7 +1309,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (controller == null || !controller.value.isInitialized) return;
     if (controller.value.isPlaying) {
       controller.pause();
-      _saveProgressNow();
+      unawaited(_saveProgressNow());
     } else {
       controller.play();
     }
@@ -1291,7 +1325,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         : (clampMax > Duration.zero && target > clampMax ? clampMax : target);
     controller.seekTo(clamped);
     _position.value = clamped;
-    _saveProgress(clamped.inSeconds, _duration.value.inSeconds);
+    unawaited(_saveProgress(clamped.inSeconds, _duration.value.inSeconds));
     _armControlsTimer();
   }
 
@@ -1956,9 +1990,12 @@ class _PlayerScreenState extends State<PlayerScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (_disposed) return;
     if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.inactive) {
+        state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.detached) {
       unawaited(_endTemporarySpeed());
-      _saveProgressNow();
+      // The flush completes before the process is backgrounded or killed, so
+      // the current position survives the app closing or the phone switching.
+      unawaited(_flushProgress());
       final controller = _controller;
       if (controller != null && controller.value.isPlaying) {
         controller.pause();
@@ -1970,7 +2007,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   void dispose() {
     unawaited(_endTemporarySpeed());
     _longPressTimer?.cancel();
-    _saveProgressNow();
+    unawaited(_flushProgress());
     _disposed = true;
     _generation++;
     _controlsTimer?.cancel();
@@ -2000,7 +2037,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     return PopScope(
       canPop: true,
       onPopInvokedWithResult: (didPop, _) {
-        if (didPop) _saveProgressNow();
+        if (didPop) unawaited(_flushProgress());
       },
       child: Scaffold(
         backgroundColor: Colors.black,
@@ -3049,7 +3086,10 @@ class _PlayerScreenState extends State<PlayerScreen>
                       child: OutlinedButton(
                         onPressed: () {
                           _chosenMatch = candidate;
-                          unawaited(_startPlayback(forceRefresh: true));
+                          unawaited(_startPlayback(
+                            forceRefresh: true,
+                            startAt: _currentPositionStart(),
+                          ));
                         },
                         style: OutlinedButton.styleFrom(
                           foregroundColor: Colors.white,
@@ -3074,7 +3114,10 @@ class _PlayerScreenState extends State<PlayerScreen>
                     if (!_isOffline)
                       ElevatedButton.icon(
                         onPressed: () => unawaited(
-                          _startPlayback(forceRefresh: true),
+                          _startPlayback(
+                            forceRefresh: true,
+                            startAt: _currentPositionStart(),
+                          ),
                         ),
                         icon: const Icon(Icons.refresh, size: 18),
                         label: Text(

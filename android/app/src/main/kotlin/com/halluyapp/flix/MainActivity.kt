@@ -38,10 +38,17 @@ class MainActivity : FlutterActivity() {
                         "getStatuses" -> {
                             val arguments = call.arguments as? Map<*, *>
                             val ids = arguments?.get("ids") as? List<*> ?: emptyList<Any>()
-                            result.success(
-                                ids.mapNotNull { it?.toString()?.toLongOrNull() }
-                                    .mapNotNull { statusFor(it) }
-                            )
+                            val statuses = mutableListOf<Map<String, Any?>>()
+                            // One missing or stale id must never drop the rest.
+                            for (id in ids.mapNotNull { it?.toString()?.toLongOrNull() }) {
+                                try {
+                                    val status = statusFor(id)
+                                    if (status != null) statuses.add(status)
+                                } catch (_: Exception) {
+                                    // Skip the one id; the next poll retries it.
+                                }
+                            }
+                            result.success(statuses)
                         }
                         "cancel" -> {
                             val arguments = call.arguments as? Map<*, *>

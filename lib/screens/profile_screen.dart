@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/user_profile.dart';
@@ -16,7 +17,7 @@ class ProfileScreen extends StatelessWidget {
   }
 
   void _selectProfile(BuildContext context, UserProfile profile) {
-    Provider.of<UserStateService>(context, listen: false).setProfile(profile);
+    unawaited(Provider.of<UserStateService>(context, listen: false).setProfile(profile));
     Navigator.of(context).pushReplacement(
       MaterialPageRoute(builder: (_) => const MainScreen()),
     );

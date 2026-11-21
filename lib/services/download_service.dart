@@ -63,9 +63,11 @@ class DownloadService extends ChangeNotifier {
     StreamResolver? resolver,
     DownloadEngine? engine,
     MediaProbe? probe,
+    Duration engineBudget = const Duration(seconds: 25),
   })  : _resolver = resolver ?? StreamResolver(),
         _engine = engine ?? platformDownloadEngine(),
-        _probe = probe ?? MediaProbe();
+        _probe = probe ?? MediaProbe(),
+        _engineBudget = engineBudget;
 
   static const String _queueKey = 'flix_offline_downloads_v2';
   static const String _wifiKey = 'flix_downloads_wifi_only';
@@ -83,6 +85,10 @@ class DownloadService extends ChangeNotifier {
   bool _wifiOnly = false;
   List<String> _preferredSubtitleLanguages = const [];
   bool _disposed = false;
+
+  /// In-flight startDownload calls, keyed so the same media + quality can only
+  /// be queued once at a time.
+  final Map<String, Future<OfflineDownload>> _inFlight = {};
 
   /// Background subtitle pass for the most recent download. Tests await it;
   /// the app never does, so a subtitle pass cannot delay a video.
@@ -116,6 +122,23 @@ class DownloadService extends ChangeNotifier {
     return total;
   }
 
+  /// Hard budgets for the native bridge. A hung engine channel must never
+  /// hold the download flow (or the polling loop) forever.
+  static const Duration _preferencesBudget = Duration(seconds: 10);
+  static const Duration _storageBudget = Duration(seconds: 10);
+  static const Duration _permissionBudget = Duration(seconds: 5);
+  final Duration _engineBudget;
+
+  /// Awaits [future] with a hard bound. On timeout, throws a clean
+  /// [StateError] so callers never wait forever on a hung platform channel.
+  Future<T> _timed<T>(Future<T> future, Duration budget, String message) async {
+    try {
+      return await future.timeout(budget);
+    } on TimeoutException {
+      throw StateError(message);
+    }
+  }
+
   Future<void>? _initializing;
 
   Future<void> init() => _initializing ??= _initialize();
@@ -123,7 +146,9 @@ class DownloadService extends ChangeNotifier {
   Future<void> _initialize() async {
     _initialized = true;
     try {
-      _preferences = await SharedPreferences.getInstance();
+      _preferences = await SharedPreferences
+          .getInstance()
+          .timeout(_preferencesBudget);
       _wifiOnly = _preferences?.getBool(_wifiKey) ?? false;
       _preferredSubtitleLanguages =
           _preferences?.getStringList(_subtitleLanguageKey) ?? const [];
@@ -228,6 +253,48 @@ class DownloadService extends ChangeNotifier {
     required Set<String> subtitleLanguages,
     int profileIndex = 0,
     bool? wifiOnly,
+  }) {
+    final isEpisode = item.mediaType == 'tv';
+    final effectiveSeason = isEpisode ? season : 0;
+    final effectiveEpisode = isEpisode ? episode : 0;
+    // One queue slot per media + quality. Concurrent taps (or a batch sheet
+    // repeating itself) share a single enqueue instead of double-queuing.
+    final inFlightKey =
+        '${item.mediaType}_${item.id}_${effectiveSeason}_${effectiveEpisode}_${source.qualityValue}';
+    final inFlight = _inFlight[inFlightKey];
+    if (inFlight != null) return inFlight;
+
+    final future = _startDownloadLocked(
+      item: item,
+      season: effectiveSeason,
+      episode: effectiveEpisode,
+      episodeTitle: episodeTitle,
+      resolved: resolved,
+      source: source,
+      subtitleLanguages: subtitleLanguages,
+      profileIndex: profileIndex,
+      wifiOnly: wifiOnly,
+    );
+    _inFlight[inFlightKey] = future;
+    future.whenComplete(() {
+      // Only clear our own entry: a newer attempt may already have replaced it.
+      if (identical(_inFlight[inFlightKey], future)) {
+        _inFlight.remove(inFlightKey);
+      }
+    });
+    return future;
+  }
+
+  Future<OfflineDownload> _startDownloadLocked({
+    required MediaItem item,
+    required int season,
+    required int episode,
+    required String episodeTitle,
+    required ResolvedMediaStream resolved,
+    required StreamSource source,
+    required Set<String> subtitleLanguages,
+    required int profileIndex,
+    bool? wifiOnly,
   }) async {
     await init();
     if (!_engine.isSupported) {
@@ -243,19 +310,16 @@ class DownloadService extends ChangeNotifier {
       );
     }
 
-    final isEpisode = item.mediaType == 'tv';
-    final effectiveSeason = isEpisode ? season : 0;
-    final effectiveEpisode = isEpisode ? episode : 0;
-
     // Never queue a link the provider is refusing. A signed URL can be
     // rate-limited (HTTP 429), region-blocked or already expired; checking the
     // first bytes first lets Flix fall back to another quality, or say what
-    // happened instead of leaving a dead download in the library.
+    // happened instead of leaving a dead download in the library. The probe
+    // is bounded and only a small number of candidates are ever checked.
     var chosen = source;
-    var effective = resolved;
     var probe = await _probe.check(chosen);
     if (probe.blocked) {
-      for (final candidate in resolved.downloadSources) {
+      for (final candidate in resolved.downloadSources
+          .take(1 + _maxFallbackCandidates)) {
         if (candidate.url == chosen.url) continue;
         final alternative = await _probe.check(candidate);
         if (!alternative.blocked) {
@@ -271,44 +335,58 @@ class DownloadService extends ChangeNotifier {
 
     final conflict = findDownload(
       item,
-      season: effectiveSeason,
-      episode: effectiveEpisode,
+      season: season,
+      episode: episode,
       qualityValue: chosen.qualityValue,
     );
     if (conflict != null) throw DownloadConflictException(conflict);
 
-    final directory = await _engine.getDirectory();
+    final directory = await _timed(
+      _engine.getDirectory(),
+      _engineBudget,
+      'Flix could not open its private downloads folder.',
+    );
     if (directory.isEmpty) {
       throw StateError('Flix could not open its private downloads folder.');
     }
 
+    final isEpisode = item.mediaType == 'tv';
     final stamp = DateTime.now().millisecondsSinceEpoch;
     final fileName = DownloadValidation.videoFileName(
       title: item.title,
       tmdbId: item.id,
       isEpisode: isEpisode,
-      season: effectiveSeason,
-      episode: effectiveEpisode,
+      season: season,
+      episode: episode,
       qualityValue: chosen.qualityValue,
       stamp: stamp,
     );
     final videoPath = '$directory${Platform.pathSeparator}$fileName';
 
-    await _engine.requestNotificationPermission();
-    final result = await _engine.enqueue(
-      DownloadEnqueueRequest(
-        url: chosen.url,
-        fileName: fileName,
-        title: isEpisode
-            ? '${item.title} · S$effectiveSeason:E$effectiveEpisode'
-            : item.title,
-        description: 'Saved in Flix · ${chosen.resolution}',
-        headers: <String, String>{
-          ...ApiConstants.zarhostingMediaHeaders,
-          ...chosen.headers,
-        },
-        wifiOnly: wifiOnly ?? _wifiOnly,
+    try {
+      await _engine.requestNotificationPermission().timeout(_permissionBudget);
+    } catch (_) {
+      // Permission is best-effort; the download must not wait on it.
+    }
+    final result = await _timed(
+      _engine.enqueue(
+        DownloadEnqueueRequest(
+          url: chosen.url,
+          fileName: fileName,
+          title: isEpisode
+              ? '${item.title} · S$season:E$episode'
+              : item.title,
+          description: 'Saved in Flix · ${chosen.resolution}',
+          headers: <String, String>{
+            ...ApiConstants.zarhostingMediaHeaders,
+            ...chosen.headers,
+          },
+          wifiOnly: wifiOnly ?? _wifiOnly,
+        ),
       ),
+      _engineBudget,
+      'Android did not confirm this download. Check your connection and try '
+          'again.',
     );
     final nativeId = (result['id'] as num?)?.toInt() ?? 0;
     if (nativeId <= 0) {
@@ -320,8 +398,8 @@ class DownloadService extends ChangeNotifier {
       key: '$nativeId-$stamp',
       nativeId: nativeId,
       item: item,
-      season: effectiveSeason,
-      episode: effectiveEpisode,
+      season: season,
+      episode: episode,
       episodeTitle: episodeTitle,
       resolution: chosen.resolution,
       qualityValue: chosen.qualityValue,
@@ -353,18 +431,20 @@ class DownloadService extends ChangeNotifier {
       // Subtitles are saved after the video is queued; they never delay it.
       final pass = _attachSubtitles(
         job: job,
-        match: effective.match,
+        match: resolved.match,
         languages: subtitleLanguages.toSet(),
         directory: directory,
         // The engine's own path, so subtitle names follow the real file.
         videoPath: returnedPath,
-        initialLoad: effective.captionLoad,
+        initialLoad: resolved.captionLoad,
       );
       pendingSubtitleWork = pass;
       unawaited(pass);
     }
     return job;
   }
+
+  static const int _maxFallbackCandidates = 1;
 
   /// Re-resolves and restarts a failed download. A verified copy is never
   /// replaced or deleted.
@@ -472,7 +552,7 @@ class DownloadService extends ChangeNotifier {
 
   Future<DownloadStorageInfo?> storageInfo() async {
     try {
-      return await _engine.storageInfo();
+      return await _engine.storageInfo().timeout(_storageBudget);
     } catch (_) {
       return null;
     }
@@ -481,7 +561,9 @@ class DownloadService extends ChangeNotifier {
   Future<void> setWifiOnly(bool value) async {
     _wifiOnly = value;
     try {
-      _preferences ??= await SharedPreferences.getInstance();
+      _preferences ??= await SharedPreferences
+          .getInstance()
+          .timeout(_preferencesBudget);
       await _preferences?.setBool(_wifiKey, value);
     } catch (_) {}
     notifyListeners();
@@ -490,7 +572,9 @@ class DownloadService extends ChangeNotifier {
   Future<void> setPreferredSubtitleLanguages(List<String> languages) async {
     _preferredSubtitleLanguages = List.unmodifiable(languages);
     try {
-      _preferences ??= await SharedPreferences.getInstance();
+      _preferences ??= await SharedPreferences
+          .getInstance()
+          .timeout(_preferencesBudget);
       await _preferences?.setStringList(
         _subtitleLanguageKey,
         _preferredSubtitleLanguages,
@@ -518,9 +602,16 @@ class DownloadService extends ChangeNotifier {
           .where((id) => id > 0)
           .toSet()
           .toList(growable: false);
-      final statuses = ids.isEmpty
-          ? const <DownloadEngineStatus>[]
-          : await _engine.statuses(ids);
+      List<DownloadEngineStatus> statuses;
+      try {
+        statuses = ids.isEmpty
+            ? const <DownloadEngineStatus>[]
+            : await _engine.statuses(ids).timeout(_engineBudget);
+      } catch (_) {
+        // A slow or failing engine answer must not flip healthy downloads
+        // to failed; the next poll gets another chance.
+        return;
+      }
       final byId = {for (final status in statuses) status.id: status};
       var changed = false;
 

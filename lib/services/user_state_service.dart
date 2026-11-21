@@ -147,6 +147,10 @@ class UserStateService extends ChangeNotifier {
 
   /// Saves run through a single chain so an older asynchronous snapshot can
   /// never land after a newer one. Snapshots are captured at call time.
+  ///
+  /// The active-profile id is deliberately NOT written here: it belongs to
+  /// [setProfile]/[deleteProfile], which write it immediately so a stale
+  /// serialized save can never resurrect a previously active profile.
   Future<void> _saveChain = Future<void>.value();
 
   Future<void> _saveToLocal() {
@@ -164,7 +168,6 @@ class UserStateService extends ChangeNotifier {
     _saveChain = _saveChain.then((_) async {
       try {
         await prefs.setString('flix_profiles', profilesJson);
-        await prefs.setString('flix_active_profile_id', pid);
         await prefs.setString('flix_my_list_$pid', myListJson);
         await prefs.setString('flix_progress_$pid', progressJson);
       } catch (error) {
@@ -174,9 +177,20 @@ class UserStateService extends ChangeNotifier {
     return _saveChain;
   }
 
-  void setProfile(UserProfile profile) {
+  /// Awaits every queued save so the current state is on disk before the app
+  /// is suspended or killed. Callers should bound this with a timeout.
+  Future<void> flush() => _saveChain;
+
+  Future<void> setProfile(UserProfile profile) async {
     _currentProfile = profile;
-    _prefs?.setString('flix_active_profile_id', profile.id);
+    try {
+      final prefs = _prefs;
+      if (prefs != null) {
+        await prefs.setString('flix_active_profile_id', profile.id);
+      }
+    } catch (error) {
+      debugPrint('Flix could not persist the active profile: $error');
+    }
     _loadProfileData();
   }
 
@@ -211,6 +225,15 @@ class UserStateService extends ChangeNotifier {
     if (wasActive) _currentProfile = _profiles.first;
     await _saveToLocal();
     if (wasActive) {
+      try {
+        final prefs = _prefs;
+        if (prefs != null) {
+          await prefs.setString(
+            'flix_active_profile_id',
+            _currentProfile.id,
+          );
+        }
+      } catch (_) {}
       _loadProfileData();
     } else {
       notifyListeners();
@@ -231,14 +254,16 @@ class UserStateService extends ChangeNotifier {
     notifyListeners();
   }
 
-  void updateProgress({
+  /// Adds or updates the saved position for one movie/episode. Returns a
+  /// future that completes once the change is on disk.
+  Future<void> updateProgress({
     required MediaItem item,
     int season = 1,
     int episode = 1,
     String? episodeTitle,
     required int positionSeconds,
     required int durationSeconds,
-  }) {
+  }) async {
     _continueWatching.removeWhere(
       (w) => w.item.id == item.id && w.season == season && w.episode == episode,
     );
@@ -254,15 +279,21 @@ class UserStateService extends ChangeNotifier {
     );
     _saveToLocal();
     notifyListeners();
+    return _saveChain;
   }
 
+  /// The most recent unfinished entry for this title. A completed entry is
+  /// only returned when nothing unfinished exists, so the resume affordance
+  /// never points at finished work.
   WatchProgress? latestProgressFor(MediaItem item) {
+    WatchProgress? fallback;
     for (final w in _continueWatching) {
       if (w.item.id == item.id && w.item.mediaType == item.mediaType) {
-        return w;
+        fallback ??= w;
+        if (!w.isCompleted && w.positionSeconds > 5) return w;
       }
     }
-    return null;
+    return fallback;
   }
 
   WatchProgress? progressFor(MediaItem item, {int season = 0, int episode = 0}) {

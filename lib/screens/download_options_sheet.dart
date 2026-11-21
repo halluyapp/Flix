@@ -55,6 +55,8 @@ class _DownloadOptionsSheetState extends State<DownloadOptionsSheet> {
     unawaited(_prepare());
   }
 
+  /// Bounded resolution: the sheet can never spin forever. Any slow or
+  /// failing resolution ends in an honest failure state with a retry path.
   Future<void> _prepare({bool refresh = false}) async {
     if (!mounted) return;
     setState(() {
@@ -62,24 +64,50 @@ class _DownloadOptionsSheetState extends State<DownloadOptionsSheet> {
       _error = null;
       _failure = null;
     });
-    final service = context.read<DownloadService>();
-    final resolution = await service.prepare(
-      widget.item,
-      season: widget.season,
-      episode: widget.episode,
-      forceRefresh: refresh,
-    );
-    final storage = await service.storageInfo();
-    if (!mounted) return;
+    try {
+      final service = context.read<DownloadService>();
+      final storage = await service
+          .storageInfo()
+          .timeout(const Duration(seconds: 10), onTimeout: () => null);
+      PlaybackResolution resolution;
+      try {
+        resolution = await service
+            .prepare(
+              widget.item,
+              season: widget.season,
+              episode: widget.episode,
+              forceRefresh: refresh,
+            )
+            .timeout(const Duration(seconds: 30));
+      } catch (error) {
+        if (!mounted) return;
+        final isTimeout = error is TimeoutException;
+        setState(() {
+          _loading = false;
+          _storage = storage;
+          _failure = ProviderException(
+            isTimeout
+                ? ProviderErrorType.providerTimeout
+                : ProviderErrorType.unknown,
+            isTimeout
+                ? 'The provider took too long to answer. Check your connection '
+                    'and try again.'
+                : 'Downloads could not be prepared. Try again.',
+            diagnostic: error.runtimeType.toString(),
+          );
+        });
+        return;
+      }
+      if (!mounted) return;
 
-    if (!resolution.isSuccess) {
-      setState(() {
-        _loading = false;
-        _failure = resolution.failure;
-        _storage = storage;
-      });
-      return;
-    }
+      if (!resolution.isSuccess) {
+        setState(() {
+          _loading = false;
+          _failure = resolution.failure;
+          _storage = storage;
+        });
+        return;
+      }
 
     final sources = resolution.stream!.downloadSources;
     StreamSource? selected;
@@ -108,16 +136,26 @@ class _DownloadOptionsSheetState extends State<DownloadOptionsSheet> {
       }
     }
 
-    setState(() {
-      _resolution = resolution;
-      _selectedSource = selected;
-      _storage = storage;
-      _wifiOnly = service.wifiOnly;
-      _selectedLanguages
-        ..clear()
-        ..addAll(chosen);
-      _loading = false;
-    });
+      setState(() {
+        _resolution = resolution;
+        _selectedSource = selected;
+        _storage = storage;
+        _wifiOnly = service.wifiOnly;
+        _selectedLanguages
+          ..clear()
+          ..addAll(chosen);
+        _loading = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _failure = ProviderException(
+          ProviderErrorType.unknown,
+          'Downloads could not be prepared: ${error.runtimeType}',
+        );
+      });
+    }
   }
 
   OfflineDownloadState get _existingState {
@@ -641,11 +679,12 @@ class _SeasonDownloadSheetState extends State<SeasonDownloadSheet> {
   }
 
   Future<void> _load() async {
-    final service = context.read<DownloadService>();
-    final storage = await service.storageInfo();
-    if (!mounted) return;
-    setState(() {
-      _storage = storage;
+    try {
+      final service = context.read<DownloadService>();
+      final storage = await service.storageInfo();
+      if (!mounted) return;
+      setState(() {
+        _storage = storage;
       _wifiOnly = service.wifiOnly;
       for (final episode in widget.episodes) {
         final existing = service.downloadStateFor(
@@ -668,8 +707,11 @@ class _SeasonDownloadSheetState extends State<SeasonDownloadSheet> {
           _selected.add(episode.episodeNumber);
         }
       }
-      _loading = false;
-    });
+        _loading = false;
+      });
+    } catch (_) {
+      if (mounted) setState(() => _loading = false);
+    }
   }
 
   Future<void> _startBatch() async {
@@ -680,10 +722,11 @@ class _SeasonDownloadSheetState extends State<SeasonDownloadSheet> {
       _cancelRequested = false;
       _summary = null;
     });
-    await service.setWifiOnly(_wifiOnly);
     var added = 0;
     var skipped = 0;
     var failed = 0;
+    try {
+      await service.setWifiOnly(_wifiOnly);
 
     for (final episode in widget.episodes) {
       if (_cancelRequested) break;
@@ -705,11 +748,23 @@ class _SeasonDownloadSheetState extends State<SeasonDownloadSheet> {
       if (mounted) {
         setState(() => _status[episode.episodeNumber] = 'Finding a source…');
       }
-      final resolution = await service.prepare(
-        widget.item,
-        season: widget.season.seasonNumber,
-        episode: episode.episodeNumber,
-      );
+      PlaybackResolution resolution;
+      try {
+        resolution = await service
+            .prepare(
+              widget.item,
+              season: widget.season.seasonNumber,
+              episode: episode.episodeNumber,
+            )
+            .timeout(const Duration(seconds: 30));
+      } catch (error) {
+        failed++;
+        if (mounted) {
+          setState(() => _status[episode.episodeNumber] =
+              'The provider took too long to answer. Try again.');
+        }
+        continue;
+      }
       if (!mounted) return;
       if (!resolution.isSuccess || resolution.stream == null) {
         failed++;
@@ -765,14 +820,27 @@ class _SeasonDownloadSheetState extends State<SeasonDownloadSheet> {
       }
     }
 
-    if (!mounted) return;
-    setState(() {
-      _running = false;
-      _summary = _cancelRequested
-          ? 'Batch stopped. $added added, $skipped already saved, $failed failed. '
-              'Completed episodes were kept.'
-          : '$added added · $skipped already saved · $failed failed';
-    });
+      if (!mounted) return;
+      setState(() {
+        _running = false;
+        _summary = _cancelRequested
+            ? 'Batch stopped. $added added, $skipped already saved, $failed failed. '
+                'Completed episodes were kept.'
+            : '$added added · $skipped already saved · $failed failed';
+      });
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _running = false;
+          _summary = 'Batch stopped: ${error.toString().replaceFirst('Bad state: ', '')}';
+        });
+      }
+    } finally {
+      if (mounted) {
+        // Never leave the batch button spinning.
+        setState(() => _running = false);
+      }
+    }
   }
 
   @override

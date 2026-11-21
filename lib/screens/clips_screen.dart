@@ -489,6 +489,7 @@ class _ClipsScreenState extends State<ClipsScreen> {
   }
 
   void _play(ProviderClip clip) {
+    final item = clip.toMediaItem();
     final match = ProviderMatch(
       subjectId: clip.subjectId,
       detailPath: clip.detailPath,
@@ -498,11 +499,18 @@ class _ClipsScreenState extends State<ClipsScreen> {
       isSeries: false,
       confidence: 1,
     );
+    // Resume a saved position the same way the detail screen does.
+    final userState = context.read<UserStateService>();
+    final saved = userState.progressFor(item);
+    final startAt = saved != null && !saved.isCompleted && saved.positionSeconds > 5
+        ? Duration(seconds: saved.positionSeconds)
+        : null;
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => PlayerScreen(
-          item: clip.toMediaItem(),
+          item: item,
           providerMatch: match,
+          startAt: startAt,
         ),
       ),
     );

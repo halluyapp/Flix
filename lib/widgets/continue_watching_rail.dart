@@ -1,6 +1,10 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:provider/provider.dart';
 import '../services/user_state_service.dart';
+import '../services/download_service.dart';
 import '../screens/player_screen.dart';
 import '../services/device_profile.dart';
 
@@ -39,6 +43,17 @@ class ContinueWatchingRail extends StatelessWidget {
 
               return GestureDetector(
                 onTap: () {
+                  // Prefer the offline copy when one exists, so a rail tap
+                  // still resumes a saved position with no network.
+                  final downloadService = context.read<DownloadService>();
+                  final offline = downloadService.downloadStateFor(
+                    progress.item,
+                    season: progress.season,
+                    episode: progress.episode,
+                  );
+                  final hasOfflineFile = offline != null &&
+                      offline.isComplete &&
+                      File(offline.filePath).existsSync();
                   Navigator.of(context).push(
                     MaterialPageRoute(
                       builder: (_) => PlayerScreen(
@@ -46,6 +61,8 @@ class ContinueWatchingRail extends StatelessWidget {
                         startSeason: progress.season,
                         startEpisode: progress.episode,
                         startAt: Duration(seconds: progress.positionSeconds),
+                        offlineFilePath: hasOfflineFile ? offline.filePath : null,
+                        offlineSubtitles: hasOfflineFile ? offline.subtitles : const [],
                       ),
                     ),
                   );

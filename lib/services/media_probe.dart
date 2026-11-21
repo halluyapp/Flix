@@ -39,13 +39,20 @@ class MediaProbeResult {
 /// Asks the media CDN for the first two bytes of a stream.
 ///
 /// Provider links are signed and short-lived, and the CDN rate-limits bursts
-/// with HTTP 429. Checking before playback/download lets Flix skip a dead link
-/// or say honestly that the provider refused it, instead of spinning.
+/// with HTTP 429. The probe is deliberately bounded — the verified primary
+/// header profile (with one HTTP 429 retry), at most [maxFallbacks] fallback
+/// profiles, one attempt per profile, and a hard total budget — so a download
+/// is never held up by Flix's own probing. Anything that cannot be answered
+/// inside the budget is reported as inconclusive, which callers treat as
+/// "proceed": Flix never blocks a download because of its own probe, only
+/// because of the provider.
 class MediaProbe {
   MediaProbe({
     http.Client? client,
     this.timeout = const Duration(seconds: 3),
     this.retryDelay = const Duration(milliseconds: 1200),
+    this.budget = const Duration(seconds: 8),
+    this.maxFallbacks = 2,
   })  : _client = client ?? http.Client(),
         _ownsClient = client == null;
 
@@ -53,21 +60,68 @@ class MediaProbe {
   final bool _ownsClient;
   final Duration timeout;
   final Duration retryDelay;
+  final Duration budget;
+  final int maxFallbacks;
+
+  /// The verified primary header profile followed by at most [maxFallbacks]
+  /// verified fallbacks. Source-specific headers ride on top of each.
+  List<Map<String, String>> _profiles(StreamSource source) {
+    final all = ApiConstants.zarhostingMediaHeaderProfiles
+        .map((profile) => <String, String>{...profile, ...source.headers})
+        .toList(growable: false);
+    if (all.isEmpty) return const [];
+    final limit = (1 + maxFallbacks).clamp(1, all.length);
+    return all.sublist(0, limit);
+  }
 
   Future<MediaProbeResult> check(
     StreamSource source, {
     List<Map<String, String>>? profiles,
+    Duration? budget,
   }) async {
-    final attempts = profiles ??
-        ApiConstants.zarhostingMediaHeaderProfiles
-            .map((profile) => <String, String>{...profile, ...source.headers})
-            .toList(growable: false);
+    try {
+      return await _checkTimed(
+        source,
+        profiles ?? _profiles(source),
+      ).timeout(
+        budget ?? this.budget,
+        onTimeout: () => MediaProbeResult(
+          reachable: true,
+          inconclusive: true,
+          statusCode: 0,
+        ),
+      );
+    } catch (_) {
+      // A probe that cannot run never blocks a download.
+      return MediaProbeResult(
+        reachable: true,
+        inconclusive: true,
+        statusCode: 0,
+      );
+    }
+  }
+
+  Future<MediaProbeResult> _checkTimed(
+    StreamSource source,
+    List<Map<String, String>> profiles,
+  ) async {
+    if (profiles.isEmpty) {
+      return MediaProbeResult(
+        reachable: true,
+        inconclusive: true,
+        statusCode: 0,
+      );
+    }
 
     var lastStatus = 0;
-    var transportFailure = false;
 
-    for (final headers in attempts) {
-      for (var pass = 0; pass < 2; pass++) {
+    for (var index = 0; index < profiles.length; index++) {
+      final headers = profiles[index];
+      final isPrimary = index == 0;
+      var transportFailure = false;
+      // The primary profile gets one HTTP 429 re-check after the delay;
+      // fallback profiles make a single attempt.
+      for (var pass = 0; pass < (isPrimary ? 2 : 1); pass++) {
         try {
           final request = http.Request('GET', Uri.parse(source.url))
             ..headers.addAll(headers)
@@ -84,7 +138,7 @@ class MediaProbe {
               statusCode: status,
             );
           }
-          if (status == 429 && pass == 0) {
+          if (status == 429 && isPrimary && pass == 0) {
             await Future<void>.delayed(retryDelay);
             continue;
           }
@@ -97,14 +151,48 @@ class MediaProbe {
           break;
         }
       }
+
+      if (transportFailure) {
+        // A transport-level answer cannot reach any header profile, so the
+        // check is inconclusive rather than blocked.
+        return MediaProbeResult(
+          reachable: true,
+          inconclusive: true,
+          statusCode: lastStatus,
+        );
+      }
+
+      // A header-shaped rejection on the primary profile may be a rotated
+      // header requirement; try the next profile. Any other decisive answer
+      // (404, 410, 5xx, …) stops the check immediately.
+      if (lastStatus != 0 && isPrimary && _isHeaderRejection(lastStatus)) {
+        continue;
+      }
+      break;
     }
 
-    final onlyTransport = transportFailure && lastStatus == 0;
+    if (lastStatus == 0) {
+      return MediaProbeResult(
+        reachable: true,
+        inconclusive: true,
+        statusCode: 0,
+      );
+    }
     return MediaProbeResult(
-      reachable: onlyTransport,
-      inconclusive: onlyTransport,
+      reachable: false,
+      inconclusive: false,
       statusCode: lastStatus,
     );
+  }
+
+  /// Auth/origin-style rejections: only these can be fixed by a different
+  /// header profile. A dead or moved file cannot be, so those stop the check.
+  static bool _isHeaderRejection(int status) {
+    return status == 401 ||
+        status == 403 ||
+        status == 426 ||
+        status == 428 ||
+        status == 429;
   }
 
   void dispose() {
