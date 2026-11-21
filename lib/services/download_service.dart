@@ -276,13 +276,23 @@ class DownloadService extends ChangeNotifier {
       wifiOnly: wifiOnly,
     );
     _inFlight[inFlightKey] = future;
-    future.whenComplete(() {
-      // Only clear our own entry: a newer attempt may already have replaced it.
-      if (identical(_inFlight[inFlightKey], future)) {
-        _inFlight.remove(inFlightKey);
-      }
-    });
+    // Clear our own entry when the attempt settles. This deliberately
+    // swallows the rejection: the caller already sees the real error, and an
+    // unhandled rejection on the wrapper would turn every expected failure
+    // (conflict, unsupported source, media unavailable) into an uncaught
+    // error.
+    future.then(
+      (_) => _dropInFlight(inFlightKey, future),
+      onError: (_) => _dropInFlight(inFlightKey, future),
+    );
     return future;
+  }
+
+  void _dropInFlight(String key, Future<OfflineDownload> future) {
+    // Only clear our own entry: a newer attempt may already have replaced it.
+    if (identical(_inFlight[key], future)) {
+      _inFlight.remove(key);
+    }
   }
 
   Future<OfflineDownload> _startDownloadLocked({
