@@ -53,8 +53,8 @@ jobs:
           rc=$?
           echo "exit code: $rc"
           if [ "$rc" -ne 0 ]; then
-            echo "::error::flutter test exited $rc — error lines below"
-            grep -E "Compilation failed|error|failure|suiteFailed|suite.failure" /tmp/flutter-test-output.log | grep -v "result\":\"success\"" | tail -60 | python3 -c "import sys; [print('::error::' + l.rstrip()[:230].replace('%','%25').replace(chr(10),' ')) for l in sys.stdin]"
+            echo "::error::flutter test exited $rc — failure lines below"
+            grep -E '"result":"(failure|error|exception)"|Compilation failed|uncaught|Uncaught' /tmp/flutter-test-output.log | tail -80 | python3 -c "import sys; [print('::error::' + l.rstrip()[:230].replace('%','%25').replace(chr(10),' ')) for l in sys.stdin]"
             exit 1
           fi
 
