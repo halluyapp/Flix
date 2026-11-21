@@ -66,10 +66,18 @@ jobs:
                   obj = json.loads(line)
               except Exception:
                   continue
-              if printed >= 15:
+              if printed >= 12:
                   break
-              if obj.get('error') or obj.get('failures') or obj.get('failed') is True:
-                  msg = f"{obj.get('name')} :: {str(obj.get('error', obj.get('failures')))[:400]}"
+              err = obj.get('error')
+              if err:
+                  # Flatten the error object so the annotation stays one line.
+                  def flat(v):
+                      if isinstance(v, dict):
+                          return ' | '.join(f'{k}={flat(i)}' for k, i in v.items())
+                      if isinstance(v, list):
+                          return ' | '.join(flat(i) for i in v)
+                      return str(v)
+                  msg = f"{obj.get('name')} :: {flat(err)[:800]}"
                   print("::error::" + msg.replace('%', '%25').replace('\n', ' '))
                   printed += 1
           PY
