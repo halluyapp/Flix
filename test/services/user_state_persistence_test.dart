@@ -54,18 +54,18 @@ void main() {
 
     test('tv episode progress is separate per episode and survives restart',
         () async {
-      final drama = drama();
+      final d = drama();
       final first = UserStateService();
       await first.init();
       await first.updateProgress(
-        item: drama,
+        item: d,
         season: 1,
         episode: 2,
         positionSeconds: 300,
         durationSeconds: 2400,
       );
       await first.updateProgress(
-        item: drama,
+        item: d,
         season: 1,
         episode: 3,
         positionSeconds: 1800,
@@ -75,27 +75,27 @@ void main() {
 
       final second = UserStateService();
       await second.init();
-      final ep2 = second.progressFor(drama, season: 1, episode: 2);
-      final ep3 = second.progressFor(drama, season: 1, episode: 3);
+      final ep2 = second.progressFor(d, season: 1, episode: 2);
+      final ep3 = second.progressFor(d, season: 1, episode: 3);
       expect(ep2?.positionSeconds, 300);
       expect(ep3?.positionSeconds, 1800);
       // Resuming motion: the latest unfinished episode is the resume target.
-      expect(second.latestProgressFor(drama)?.episode, 3);
+      expect(second.latestProgressFor(d)?.episode, 3);
     });
 
     test('a completed episode is not offered as the resume target', () async {
-      final drama = drama();
+      final d = drama();
       final first = UserStateService();
       await first.init();
       await first.updateProgress(
-        item: drama,
+        item: d,
         season: 1,
         episode: 1,
         positionSeconds: 2280,
         durationSeconds: 2400, // 95% -> completed
       );
       await first.updateProgress(
-        item: drama,
+        item: d,
         season: 1,
         episode: 2,
         positionSeconds: 900,
@@ -105,12 +105,12 @@ void main() {
 
       final second = UserStateService();
       await second.init();
-      final resume = second.latestProgressFor(drama);
+      final resume = second.latestProgressFor(d);
       expect(resume, isNotNull);
       expect(resume!.episode, 2);
       expect(resume.isCompleted, isFalse);
       // The completed episode keeps its own record, only its resume is gone.
-      final completed = second.progressFor(drama, season: 1, episode: 1);
+      final completed = second.progressFor(d, season: 1, episode: 1);
       expect(completed, isNotNull);
       expect(completed!.isCompleted, isTrue);
     });
@@ -132,14 +132,14 @@ void main() {
     test('progress is isolated per profile and survives a profile switch',
         () async {
       SharedPreferences.setMockInitialValues({});
-      final drama = drama(id: 300);
+      final d = drama(id: 300);
       final service = UserStateService();
       await service.init();
 
       // Profile 2 (Alex) starts empty.
       await service.setProfile(service.profiles[1]);
       await service.updateProgress(
-        item: drama,
+        item: d,
         season: 1,
         episode: 4,
         positionSeconds: 700,
@@ -149,19 +149,19 @@ void main() {
 
       // Switching back to profile 1 must not see profile 2's progress.
       await service.setProfile(service.profiles[0]);
-      expect(service.progressFor(drama, season: 1, episode: 4), isNull);
+      expect(service.progressFor(d, season: 1, episode: 4), isNull);
       expect(service.continueWatching, isEmpty);
 
       // Switching forward again restores it from disk.
       await service.setProfile(service.profiles[1]);
-      final saved = service.progressFor(drama, season: 1, episode: 4);
+      final saved = service.progressFor(d, season: 1, episode: 4);
       expect(saved, isNotNull);
       expect(saved!.positionSeconds, 700);
 
       // A fresh instance on this profile (app restart) still finds it.
       final restart = UserStateService();
       await restart.init();
-      final restarted = restart.progressFor(drama, season: 1, episode: 4);
+      final restarted = restart.progressFor(d, season: 1, episode: 4);
       expect(restarted, isNotNull);
       expect(restarted!.positionSeconds, 700);
     });
