@@ -49,15 +49,30 @@ jobs:
       - name: Run test suite
         run: |
           set +e
-          flutter test --reporter expanded > /tmp/flutter-test-output.log 2>&1
+          flutter test --reporter json > /tmp/flutter-test-output.log 2>&1
           rc=$?
-          cat /tmp/flutter-test-output.log
+          echo "exit code: $rc"
           if [ "$rc" -ne 0 ]; then
-            echo "::error::flutter test failed with exit code $rc"
-            grep -E "✗|✘|✕|FAILED" /tmp/flutter-test-output.log | head -60 | while IFS= read -r line; do
-              echo "::error::$line"
-            done
-            echo "::error::Recent failures — full log in the job output"
+            python3 - <<'PY'
+          import json
+          with open('/tmp/flutter-test-output.log') as fh:
+              text = fh.read()
+          # The json reporter emits one JSON object per line.
+          for line in text.splitlines():
+              line = line.strip()
+              if not line.startswith('{'):
+                  continue
+              try:
+                  obj = json.loads(line)
+              except Exception:
+                  continue
+              status = obj.get('status')
+              test_name = obj.get('test') or obj.get('name') or ''
+              if status not in ('success', 'pass', 'passed') and test_name:
+                  msg = f"{test_name} ({status})"
+                  print("::error::" + msg)
+          PY
+            echo "::error::test failure summary above — full log in the job output"
             exit 1
           fi
 
