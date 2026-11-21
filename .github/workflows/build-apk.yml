@@ -53,35 +53,13 @@ jobs:
           rc=$?
           echo "exit code: $rc"
           if [ "$rc" -ne 0 ]; then
-            python3 - <<'PY'
-          import json
-          with open('/tmp/flutter-test-output.log') as fh:
-              text = fh.read()
-          printed = 0
-          for line in text.splitlines():
-              line = line.strip()
-              if not line.startswith('{'):
-                  continue
-              try:
-                  obj = json.loads(line)
-              except Exception:
-                  continue
-              if printed >= 12:
-                  break
-              err = obj.get('error')
-              if err:
-                  # Flatten the error object so the annotation stays one line.
-                  def flat(v):
-                      if isinstance(v, dict):
-                          return ' | '.join(f'{k}={flat(i)}' for k, i in v.items())
-                      if isinstance(v, list):
-                          return ' | '.join(flat(i) for i in v)
-                      return str(v)
-                  msg = f"{obj.get('name')} :: {flat(err)[:800]}"
-                  print("::error::" + msg.replace('%', '%25').replace('\n', ' '))
-                  printed += 1
-          PY
-            echo "::error::test failure summary above — full log in the job output"
+            echo "::error::flutter test exited $rc — last 45 lines below"
+            tail -45 /tmp/flutter-test-output.log | python3 -c "
+import sys
+for line in sys.stdin:
+    msg = line.rstrip()[:230].replace('%', '%25').replace(chr(10), ' ')
+    print('::error::' + msg)
+"
             exit 1
           fi
 
