@@ -47,7 +47,19 @@ jobs:
         run: flutter pub get
 
       - name: Run test suite
-        run: flutter test
+        run: |
+          set +e
+          flutter test --reporter expanded > /tmp/flutter-test-output.log 2>&1
+          rc=$?
+          cat /tmp/flutter-test-output.log
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::flutter test failed with exit code $rc"
+            grep -E "✗|✘|✕|FAILED" /tmp/flutter-test-output.log | head -60 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+            echo "::error::Recent failures — full log in the job output"
+            exit 1
+          fi
 
       - name: Build one universal release APK
         run: flutter build apk --release --build-name="1.0.${{ github.run_number }}" --build-number="${{ github.run_number }}"
