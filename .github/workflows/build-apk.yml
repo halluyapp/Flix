@@ -57,7 +57,7 @@ jobs:
           import json
           with open('/tmp/flutter-test-output.log') as fh:
               text = fh.read()
-          # The json reporter emits one JSON object per line.
+          printed = 0
           for line in text.splitlines():
               line = line.strip()
               if not line.startswith('{'):
@@ -66,11 +66,12 @@ jobs:
                   obj = json.loads(line)
               except Exception:
                   continue
-              status = obj.get('status')
-              test_name = obj.get('test') or obj.get('name') or ''
-              if status not in ('success', 'pass', 'passed') and test_name:
-                  msg = f"{test_name} ({status})"
-                  print("::error::" + msg)
+              if printed >= 15:
+                  break
+              if obj.get('error') or obj.get('failures') or obj.get('failed') is True:
+                  msg = f"{obj.get('name')} :: {str(obj.get('error', obj.get('failures')))[:400]}"
+                  print("::error::" + msg.replace('%', '%25').replace('\n', ' '))
+                  printed += 1
           PY
             echo "::error::test failure summary above — full log in the job output"
             exit 1
