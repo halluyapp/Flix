@@ -627,12 +627,39 @@ class SeasonDownloadSheet extends StatefulWidget {
 class _SeasonDownloadSheetState extends State<SeasonDownloadSheet> {
   final Set<int> _selected = <int>{};
   final Map<int, String> _status = <int, String>{};
+  int _selectedQuality = 720;
   DownloadStorageInfo? _storage;
   bool _wifiOnly = false;
   bool _running = false;
   bool _cancelRequested = false;
   bool _loading = true;
   String? _summary;
+
+  int _estimatedBytesFor(Episode episode, int quality) {
+    final runtimeMin = episode.runtime > 0 ? episode.runtime : 45;
+    final mbPerMinute = switch (quality) {
+      360 => 4.2,
+      480 => 8.5,
+      720 => 18.0,
+      1080 => 34.0,
+      _ => 18.0,
+    };
+    return (runtimeMin * mbPerMinute * 1024 * 1024).round();
+  }
+
+  String _formatTotalEstimatedSize() {
+    var totalBytes = 0;
+    for (final ep in widget.episodes) {
+      if (_selected.contains(ep.episodeNumber) && ep.isReleased) {
+        totalBytes += _estimatedBytesFor(ep, _selectedQuality);
+      }
+    }
+    if (totalBytes <= 0) return '0 MB';
+    if (totalBytes >= 1024 * 1024 * 1024) {
+      return '${(totalBytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+    }
+    return '${(totalBytes / (1024 * 1024)).toStringAsFixed(0)} MB';
+  }
 
   @override
   void initState() {
@@ -724,10 +751,15 @@ class _SeasonDownloadSheetState extends State<SeasonDownloadSheet> {
             'Streaming only · cannot download');
         continue;
       }
-      final preferred = sources
-          .where((source) => source.qualityValue > 0 && source.qualityValue <= 720)
-          .toList()
-        ..sort((a, b) => b.qualityValue.compareTo(a.qualityValue));
+      final matching = sources
+          .where((source) => source.qualityValue == _selectedQuality)
+          .toList();
+      final preferred = matching.isNotEmpty
+          ? matching
+          : (sources
+              .where((source) => source.qualityValue <= _selectedQuality)
+              .toList()
+            ..sort((a, b) => b.qualityValue.compareTo(a.qualityValue)));
       final source = preferred.isNotEmpty ? preferred.first : sources.first;
       final captions = resolution.stream!.captions;
       final languages = <String>{};
@@ -831,7 +863,44 @@ class _SeasonDownloadSheetState extends State<SeasonDownloadSheet> {
                       fontSize: 12,
                     ),
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 10),
+                  const _SectionLabel('DOWNLOAD RESOLUTION'),
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [360, 480, 720, 1080].map((q) {
+                      final isSel = _selectedQuality == q;
+                      return Expanded(
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 3),
+                          child: InkWell(
+                            onTap: _running ? null : () => setState(() => _selectedQuality = q),
+                            borderRadius: BorderRadius.circular(8),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(vertical: 8),
+                              decoration: BoxDecoration(
+                                color: isSel ? _accent : const Color(0xFF262626),
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(
+                                  color: isSel ? _accent : Colors.white12,
+                                ),
+                              ),
+                              child: Center(
+                                child: Text(
+                                  '${q}P',
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontWeight: isSel ? FontWeight.bold : FontWeight.w500,
+                                    fontSize: 12.5,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      );
+                    }).toList(),
+                  ),
+                  const SizedBox(height: 10),
                   Row(
                     children: [
                       TextButton(
@@ -900,21 +969,24 @@ class _SeasonDownloadSheetState extends State<SeasonDownloadSheet> {
                               fontSize: 13.5,
                             ),
                           ),
-                          subtitle: status == null
-                              ? null
-                              : Text(
-                                  status,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    color: isDone
-                                        ? const Color(0xFF46D369)
-                                        : isUnreleased
-                                            ? Colors.white38
-                                            : Colors.white54,
-                                    fontSize: 11.5,
-                                  ),
-                                ),
+                          subtitle: Text(
+                            [
+                              if (episode.runtime > 0) '${episode.runtime}m',
+                              if (episode.isReleased && !isDone)
+                                '~${(_estimatedBytesFor(episode, _selectedQuality) / (1024 * 1024)).toStringAsFixed(0)} MB',
+                              if (status != null) status,
+                            ].join(' · '),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: isDone
+                                  ? const Color(0xFF46D369)
+                                  : isUnreleased
+                                      ? Colors.white38
+                                      : Colors.white54,
+                              fontSize: 11.5,
+                            ),
+                          ),
                         );
                       },
                     ),
@@ -995,7 +1067,7 @@ class _SeasonDownloadSheetState extends State<SeasonDownloadSheet> {
                           label: Text(
                             _running
                                 ? 'Starting batch…'
-                                : 'Download ${_selected.length} episodes',
+                                : 'Download ${_selected.length} episodes (${_formatTotalEstimatedSize()})',
                           ),
                         ),
                       ),

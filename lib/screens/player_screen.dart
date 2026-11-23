@@ -123,7 +123,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   Timer? _progressTimer;
   Timer? _nextPromptTimer;
   Timer? _longPressTimer;
+  Timer? _hold2xTimer;
   Offset? _pointerDownPos;
+  bool _isPointerHolding = false;
   int _generation = 0;
   bool _disposed = false;
   int _profileIndex = 0;
@@ -573,7 +575,14 @@ class _PlayerScreenState extends State<PlayerScreen>
         final resumeAt = startAt ?? _resumePosition();
         if (resumeAt > Duration.zero) {
           await controller.seekTo(resumeAt);
-          _showMessage('Resumed at ${_formatDuration(resumeAt)}');
+          Future.delayed(const Duration(milliseconds: 200), () {
+            if (!_disposed && controller.value.isInitialized) {
+              final pos = controller.value.position;
+              if (pos.inSeconds < 2 && resumeAt.inSeconds > 4) {
+                controller.seekTo(resumeAt);
+              }
+            }
+          });
         }
         await controller.play();
         _playing.value = true;
@@ -626,7 +635,14 @@ class _PlayerScreenState extends State<PlayerScreen>
         final resumeAt = startAt ?? _resumePosition();
         if (resumeAt > Duration.zero) {
           await controller.seekTo(resumeAt);
-          _showMessage('Resumed at ${_formatDuration(resumeAt)}');
+          Future.delayed(const Duration(milliseconds: 200), () {
+            if (!_disposed && controller.value.isInitialized) {
+              final pos = controller.value.position;
+              if (pos.inSeconds < 2 && resumeAt.inSeconds > 4) {
+                controller.seekTo(resumeAt);
+              }
+            }
+          });
         }
         await controller.play();
 
@@ -1970,6 +1986,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   void dispose() {
     unawaited(_endTemporarySpeed());
     _longPressTimer?.cancel();
+    _hold2xTimer?.cancel();
     _saveProgressNow();
     _disposed = true;
     _generation++;
@@ -2156,7 +2173,41 @@ class _PlayerScreenState extends State<PlayerScreen>
     return Stack(
       children: [
         Positioned.fill(
-          child: GestureDetector(
+          child: Listener(
+            behavior: HitTestBehavior.translucent,
+            onPointerDown: (event) {
+              _pointerDownPos = event.position;
+              _hold2xTimer?.cancel();
+              _hold2xTimer = Timer(const Duration(milliseconds: 350), () {
+                if (!_isPinching && !_isDragSeeking && !_isVerticalAdjusting && !_disposed) {
+                  _isPointerHolding = true;
+                  unawaited(_beginTemporarySpeed());
+                }
+              });
+            },
+            onPointerMove: (event) {
+              if (_pointerDownPos != null && !_isPointerHolding) {
+                final dist = (event.position - _pointerDownPos!).distance;
+                if (dist > 18) {
+                  _hold2xTimer?.cancel();
+                }
+              }
+            },
+            onPointerUp: (event) {
+              _hold2xTimer?.cancel();
+              if (_isPointerHolding) {
+                _isPointerHolding = false;
+                unawaited(_endTemporarySpeed());
+              }
+            },
+            onPointerCancel: (event) {
+              _hold2xTimer?.cancel();
+              if (_isPointerHolding) {
+                _isPointerHolding = false;
+                unawaited(_endTemporarySpeed());
+              }
+            },
+            child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: _toggleControls,
             onDoubleTapDown: (details) {
@@ -2262,6 +2313,7 @@ class _PlayerScreenState extends State<PlayerScreen>
               _safeSetState(() => _dragSeekTarget = null);
             },
           ),
+        ),
         ),
         if (_temporarySpeedActive)
           Positioned(
@@ -2594,6 +2646,38 @@ class _PlayerScreenState extends State<PlayerScreen>
                           ),
                         ),
                     ],
+                  ),
+                ),
+                InkWell(
+                  onTap: () {
+                    final nextSpeed = _speed == 2.0
+                        ? 1.0
+                        : (_speed == 1.0 ? 1.5 : (_speed == 1.5 ? 2.0 : 1.0));
+                    unawaited(_setSpeed(nextSpeed));
+                    _armControlsTimer();
+                  },
+                  onLongPress: () {
+                    unawaited(_openSpeedSheet());
+                  },
+                  borderRadius: BorderRadius.circular(6),
+                  child: Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 4),
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: _speed > 1.0 ? _accent : Colors.white12,
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(
+                        color: _speed > 1.0 ? _accent : Colors.white24,
+                      ),
+                    ),
+                    child: Text(
+                      _speed == 1.0 ? '1X' : (_speed == 2.0 ? '2X' : '${_speed}X'),
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
                   ),
                 ),
                 _hudIcon(

@@ -1,10 +1,9 @@
 import 'media_item.dart';
 
-/// A short movie returned by Zarhosting's public catalogue search.
+/// A short movie returned by the media provider's catalogue search.
 ///
-/// Clips are accepted only when the provider explicitly marks the item as a
-/// movie, includes the exact "Short" genre, and reports a playable resource.
-/// A text match such as a title containing "short" is never sufficient.
+/// Clips are accepted only when the provider marks the item as a movie,
+/// includes a short/animation tag or genre, and reports a playable resource.
 class ProviderClip {
   final String subjectId;
   final String detailPath;
@@ -28,11 +27,15 @@ class ProviderClip {
     required this.rating,
   });
 
+  bool get isPornographic => false;
+
   static const Set<String> _shortGenreNames = {
     'short',
     'shorts',
     'short film',
     'short films',
+    'animation',
+    'anime',
   };
 
   static const Set<String> _adultGenres = {
@@ -76,23 +79,29 @@ class ProviderClip {
       'explicit',
       'nsfw',
       'is_nsfw',
+      'isPornographic',
+      'is_pornographic',
     ];
     if (flagKeys.any((key) => _isAffirmative(json[key]))) return true;
 
-    final ageRating = (json['age_rating'] ?? json['content_rating'] ?? json['maturity_rating'])
+    final ageRating = (json['age_rating'] ??
+            json['content_rating'] ??
+            json['maturity_rating'])
         ?.toString()
         .trim();
     return ageRating != null && _adultRating.hasMatch(ageRating);
   }
 
   /// Returns null unless provider metadata verifies this as a playable short
-  /// movie. Unknown numeric provider types and any explicit adult marker are
-  /// deliberately rejected.
+  /// movie. Unknown types and any explicit adult marker are deliberately rejected.
   static ProviderClip? fromProviderJson(Map<String, dynamic> json) {
     String value(Object? input) => input?.toString().trim() ?? '';
 
-    final providerType = value(json['type'] ?? json['subject_type']).toLowerCase();
-    if (providerType != 'movie' || _isAdultRecord(json)) return null;
+    final rawType = value(
+      json['type'] ?? json['subject_type'] ?? json['subjectType'],
+    ).toLowerCase();
+    final isMovieType = rawType == 'movie' || rawType == '1';
+    if (!isMovieType || _isAdultRecord(json)) return null;
 
     final rawGenre = json['genre'] ?? json['genres'];
     final genres = rawGenre is List
@@ -106,21 +115,42 @@ class ProviderClip {
     if (!normalizedGenres.any(_shortGenreNames.contains)) return null;
     if (normalizedGenres.any(_adultGenres.contains)) return null;
 
-    final title = value(json['base_title'] ?? json['name'] ?? json['title'] ?? json['subject_title']);
-    final subjectId = value(json['subject_id'] ?? json['subjectId'] ?? json['id']);
-    final detailPath = value(json['detail_path'] ?? json['detailPath'] ?? json['slug']);
-    final hasResource = json['has_resource'] == true || json['hasResource'] == true;
-    if (title.isEmpty || subjectId.isEmpty || detailPath.isEmpty || !hasResource) {
+    final title = value(json['base_title'] ??
+        json['name'] ??
+        json['title'] ??
+        json['subject_title']);
+    final subjectId = value(
+        json['subject_id'] ?? json['subjectId'] ?? json['id']);
+    final detailPath = value(
+        json['detail_path'] ?? json['detailPath'] ?? json['slug']);
+    final hasResource =
+        json['has_resource'] == true || json['hasResource'] == true;
+    if (title.isEmpty ||
+        subjectId.isEmpty ||
+        detailPath.isEmpty ||
+        !hasResource) {
       return null;
     }
     if (_explicitTitle.hasMatch(title)) return null;
 
-    final rawYear = value(json['year'] ?? json['release_year'] ?? json['release_date']);
-    final year = int.tryParse(rawYear.length >= 4 ? rawYear.substring(0, 4) : rawYear) ?? 0;
-    final rawRating = value(json['rating'] ?? json['vote_average']);
+    final rawYear = value(
+        json['year'] ?? json['release_year'] ?? json['release_date']);
+    final year =
+        int.tryParse(rawYear.length >= 4 ? rawYear.substring(0, 4) : rawYear) ??
+            0;
+    final rawRating = value(json['rating'] ??
+        json['vote_average'] ??
+        json['imdbRatingValue']);
     final rating = double.tryParse(rawRating) ?? 0.0;
-    final rawPosterUrl = value(json['poster_url'] ?? json['posterUrl']);
-    final posterUrl = rawPosterUrl.startsWith('https://') ? rawPosterUrl : '';
+
+    String posterUrl = '';
+    final cover = json['cover'];
+    if (cover is Map && cover['url'] != null) {
+      posterUrl = value(cover['url']);
+    } else {
+      posterUrl = value(json['poster_url'] ?? json['posterUrl']);
+    }
+    if (!posterUrl.startsWith('https://')) posterUrl = '';
 
     return ProviderClip(
       subjectId: subjectId,
@@ -128,7 +158,7 @@ class ProviderClip {
       title: title,
       posterUrl: posterUrl,
       genre: genres.join(' • '),
-      country: value(json['country']),
+      country: value(json['country'] ?? json['countryName']),
       description: value(json['description'] ?? json['overview']),
       year: year,
       rating: rating,
@@ -136,8 +166,7 @@ class ProviderClip {
   }
 
   /// Converts only the viewer-facing fields used by the existing player and
-  /// local Continue Watching store. Stream resolution uses [subjectId] and
-  /// [detailPath] directly, not a TMDB title search.
+  /// local Continue Watching store.
   MediaItem toMediaItem() {
     final yearDate = year > 0 ? '$year-01-01' : '';
     return MediaItem(
@@ -163,8 +192,6 @@ class ProviderClip {
     for (final codeUnit in value.codeUnits) {
       hash = ((hash ^ codeUnit) * 0x01000193) & 0x7fffffff;
     }
-    // Negative IDs keep provider titles separate from TMDB's positive IDs in
-    // the existing local My List and Continue Watching collections.
     return -(hash + 1);
   }
 }
