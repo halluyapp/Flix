@@ -37,6 +37,7 @@ class CaptionResponseAdapter {
     'caption_list',
     'captionList',
     'items',
+    'list',
   ];
 
   static const List<String> _wrapperKeys = [
@@ -130,14 +131,18 @@ class CaptionResponseAdapter {
   static void _throwIfProviderError(Map<String, dynamic> root) {
     final error = ProviderPayload.string(root, const ['error']);
     final failed = root['success'] == false;
-    if (error.isEmpty && !failed) return;
-    final code = error.isEmpty ? 'success_false' : error;
+    final code = root['code'];
+    final hasErrorCode = code is num && code != 0;
+    if (error.isEmpty && !failed && !hasErrorCode) return;
+    final codeStr = error.isNotEmpty
+        ? error
+        : (hasErrorCode ? 'code_$code' : 'success_false');
     throw ProviderException(
-      code == 'upstream_error'
+      codeStr == 'upstream_error'
           ? ProviderErrorType.providerUnavailable
           : ProviderErrorType.invalidProviderResponse,
       'The provider could not return subtitles for this episode.',
-      diagnostic: 'error=${code.substring(0, code.length.clamp(0, 48))}',
+      diagnostic: 'error=${codeStr.substring(0, codeStr.length.clamp(0, 48))}',
     );
   }
 

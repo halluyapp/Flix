@@ -6,7 +6,7 @@ import '../models/media_item.dart';
 import '../models/provider_match.dart';
 import '../models/stream_source.dart';
 import 'diagnostics_service.dart';
-import 'zarhosting_service.dart';
+import 'moviebox_service.dart';
 
 /// A successfully resolved playback session.
 class ResolvedMediaStream {
@@ -118,17 +118,17 @@ class StreamResolver {
   /// lookup keeps running in the background and its result is cached.
   static const Duration captionBudget = Duration(seconds: 6);
 
-  final ZarhostingService _service;
+  final MovieBoxService _service;
   final Map<String, _CachedMatch> _matchCache = {};
   final Map<String, _CachedStream> _streamCache = {};
   final Map<String, Future<PlaybackResolution>> _inFlight = {};
   final Map<String, _CachedCaptions> _captionCache = {};
   final Map<String, Future<CaptionLoad>> _captionInFlight = {};
 
-  StreamResolver({ZarhostingService? service})
-      : _service = service ?? ZarhostingService();
+  StreamResolver({MovieBoxService? service})
+      : _service = service ?? MovieBoxService();
 
-  ZarhostingService get providerService => _service;
+  MovieBoxService get providerService => _service;
 
   void clearCache() {
     _matchCache.clear();
@@ -335,7 +335,7 @@ class StreamResolver {
         sources: sources,
         captionLoad: captionLoad,
         match: match,
-        mediaHeaders: ApiConstants.zarhostingMediaHeaders,
+        mediaHeaders: ApiConstants.movieboxMediaHeaders,
       );
       _streamCache[_streamKey(item, effectiveSeason, effectiveEpisode)] =
           _CachedStream(resolved);

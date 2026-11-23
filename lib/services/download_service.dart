@@ -304,7 +304,7 @@ class DownloadService extends ChangeNotifier {
             : item.title,
         description: 'Saved in Flix · ${chosen.resolution}',
         headers: <String, String>{
-          ...ApiConstants.zarhostingMediaHeaders,
+          ...ApiConstants.movieboxMediaHeaders,
           ...chosen.headers,
         },
         wifiOnly: wifiOnly ?? _wifiOnly,

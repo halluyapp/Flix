@@ -594,7 +594,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       }
     }
 
-    final profiles = ApiConstants.zarhostingMediaHeaderProfiles
+    final profiles = ApiConstants.movieboxMediaHeaderProfiles
         .map((profile) => <String, String>{...profile, ...source.headers})
         .toList(growable: false);
     final startIndex = _profileIndex.clamp(0, profiles.length - 1).toInt();

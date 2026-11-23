@@ -1,7 +1,7 @@
-/// Defensive readers for Zarhosting's public API payloads.
+/// Defensive readers for provider API payloads (MovieBox H5 API and legacy formats).
 ///
-/// The public API returns items at the root of search responses, but the same
-/// data can arrive wrapped in `data`, and older mirrors nest it further. These
+/// The public API returns items under `data.items` or `data.list`, but the same
+/// data can arrive wrapped differently across endpoints and mirrors. These
 /// helpers accept every shape seen in the live contract without turning a
 /// malformed response into a silent empty result.
 class ProviderPayload {
@@ -13,8 +13,7 @@ class ProviderPayload {
     return const <String, dynamic>{};
   }
 
-  /// Unwraps a single `data` envelope. Stream and caption responses currently
-  /// have their fields at the root; `data` is supported for older mirrors.
+  /// Unwraps a single `data` envelope.
   static Map<String, dynamic> bodyOf(dynamic decoded) {
     final root = asMap(decoded);
     final data = root['data'];
@@ -56,6 +55,28 @@ class ProviderPayload {
     return '';
   }
 
+  /// Extracts a cover or poster URL, handling nested object shapes like
+  /// `{"cover": {"url": "https://..."}}` common in MovieBox H5 API.
+  static String posterUrl(Map<String, dynamic> map) {
+    final cover = map['cover'];
+    if (cover is Map) {
+      final url = cover['url']?.toString().trim() ?? '';
+      if (url.isNotEmpty && url.toLowerCase() != 'null') return url;
+    } else if (cover is String && cover.trim().isNotEmpty && cover.toLowerCase() != 'null') {
+      return cover.trim();
+    }
+    return string(map, const [
+      'poster_url',
+      'posterUrl',
+      'cover_url',
+      'coverUrl',
+      'poster',
+      'image',
+      'thumb',
+      'thumbnail',
+    ]);
+  }
+
   static bool? optionalBool(Map<String, dynamic> map, List<String> keys) {
     for (final key in keys) {
       final value = map[key];
@@ -90,7 +111,7 @@ class ProviderPayload {
     return fallback;
   }
 
-  /// Provider years arrive as `year`, `release_year` or an ISO release date.
+  /// Provider years arrive as `year`, `release_year`, `releaseYear` or an ISO release date.
   static int year(Map<String, dynamic> map) {
     for (final key in const ['year', 'release_year', 'releaseYear']) {
       final raw = map[key]?.toString().trim() ?? '';

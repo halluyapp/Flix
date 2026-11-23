@@ -59,7 +59,7 @@ class MediaProbe {
     List<Map<String, String>>? profiles,
   }) async {
     final attempts = profiles ??
-        ApiConstants.zarhostingMediaHeaderProfiles
+        ApiConstants.movieboxMediaHeaderProfiles
             .map((profile) => <String, String>{...profile, ...source.headers})
             .toList(growable: false);
 

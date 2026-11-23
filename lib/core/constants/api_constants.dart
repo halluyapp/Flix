@@ -13,21 +13,26 @@ class ApiConstants {
   static const String tmdbImageBaseOriginal =
       'https://image.tmdb.org/t/p/original';
 
-  // Zarhosting Media Provider Endpoints (same integration used by Hallyu TV)
-  static const String zarhostingBaseUrl =
-      'https://movieapi.zarhosting.dpdns.org/api/public/v1';
+  // MovieBox H5 API Endpoints (replaces dead Zarhosting provider)
+  static const String movieboxBaseUrl =
+      'https://h5-api.aoneroom.com/wefeed-h5api-bff';
+  static const String movieboxHost = 'moviebox.ph';
+  static const String movieboxSiteUrl = 'https://moviebox.ph';
 
-  static const Map<String, String> zarhostingApiHeaders = {
+  // Required headers for MovieBox H5 API calls
+  static const Map<String, String> movieboxApiHeaders = {
     'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     'Referer': 'https://moviebox.ph/',
+    'Origin': 'https://moviebox.ph',
     'Accept': 'application/json',
+    'X-Client-Info': '{"timezone":"Africa/Lagos"}',
   };
 
-  // Primary verified media & streaming headers required by Zarhosting / hakunaymatata CDN.
+  // Primary verified media & streaming headers required by MovieBox CDN (hakunaymatata CDN).
   // The CDN strictly allows mobile/browser clients with moviebox.ph referer/origin
   // and rejects bare ExoPlayer/movieboxpro.app with 428/429.
-  static const Map<String, String> zarhostingMediaHeaders = {
+  static const Map<String, String> movieboxMediaHeaders = {
     'User-Agent':
         'Mozilla/5.0 (Linux; Android 13; SM-S908B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
     'Referer': 'https://moviebox.ph/',
@@ -67,8 +72,15 @@ class ApiConstants {
     },
   ];
 
-  static const List<Map<String, String>> zarhostingMediaHeaderProfiles = [
-    zarhostingMediaHeaders,
+  static const List<Map<String, String>> movieboxMediaHeaderProfiles = [
+    movieboxMediaHeaders,
     ...fallbackMediaHeaderProfiles,
   ];
+
+  // Backwards compatibility aliases for previous Zarhosting integration
+  static const String zarhostingBaseUrl = movieboxBaseUrl;
+  static const Map<String, String> zarhostingApiHeaders = movieboxApiHeaders;
+  static const Map<String, String> zarhostingMediaHeaders = movieboxMediaHeaders;
+  static const List<Map<String, String>> zarhostingMediaHeaderProfiles =
+      movieboxMediaHeaderProfiles;
 }

@@ -104,7 +104,7 @@ class SubtitleService {
     final deadline = DateTime.now().add(totalBudget);
     SubtitleException? lastFailure;
     try {
-      for (final profile in ApiConstants.zarhostingMediaHeaderProfiles) {
+      for (final profile in ApiConstants.movieboxMediaHeaderProfiles) {
         if (DateTime.now().isAfter(deadline)) break;
         try {
           return await _getWithRetry(httpClient, uri, profile);

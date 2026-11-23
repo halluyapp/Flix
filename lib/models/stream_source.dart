@@ -219,6 +219,17 @@ class StreamSource {
       }
     }
 
+    final headers = Map<String, String>.from(extraHeaders);
+    final cookie = (json['signCookie'] ?? json['sign_cookie'] ?? json['cookie'])?.toString().trim();
+    if (cookie != null && cookie.isNotEmpty && !headers.containsKey('Cookie')) {
+      headers['Cookie'] = cookie;
+    }
+    final signHeaderKey = (json['signHeaderKey'] ?? json['sign_header_key'])?.toString().trim();
+    final signHeaderValue = (json['signHeaderValue'] ?? json['sign_header_value'] ?? cookie)?.toString().trim();
+    if (signHeaderKey != null && signHeaderKey.isNotEmpty && signHeaderValue != null && signHeaderValue.isNotEmpty) {
+      headers[signHeaderKey] = signHeaderValue;
+    }
+
     return StreamSource(
       url: url,
       resolution: resolution,
@@ -231,7 +242,7 @@ class StreamSource {
       verifiedFullLength: verifiedFullLength,
       codec: (json['codec'] ?? json['codecName'] ?? '').toString().trim(),
       sourceLabel: sourceLabel,
-      headers: extraHeaders,
+      headers: headers,
     );
   }
 

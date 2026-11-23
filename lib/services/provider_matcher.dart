@@ -193,10 +193,7 @@ class ProviderMatcher {
       }
       confidence = confidence.clamp(0.0, 1.0).toDouble();
 
-      final poster = ProviderPayload.string(
-        item,
-        const ['poster_url', 'posterUrl'],
-      );
+      final poster = ProviderPayload.posterUrl(item);
       final audioLanguage = ProviderPayload.string(
         item,
         const ['audio', 'language', 'badge'],

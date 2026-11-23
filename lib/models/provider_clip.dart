@@ -1,6 +1,7 @@
 import 'media_item.dart';
+import '../services/provider_payload.dart';
 
-/// A short movie returned by Zarhosting's public catalogue search.
+/// A short movie returned by the media provider's catalogue search.
 ///
 /// Clips are accepted only when the provider explicitly marks the item as a
 /// movie, includes the exact "Short" genre, and reports a playable resource.
@@ -91,8 +92,9 @@ class ProviderClip {
   static ProviderClip? fromProviderJson(Map<String, dynamic> json) {
     String value(Object? input) => input?.toString().trim() ?? '';
 
-    final providerType = value(json['type'] ?? json['subject_type']).toLowerCase();
-    if (providerType != 'movie' || _isAdultRecord(json)) return null;
+    final providerType = value(json['type'] ?? json['subject_type'] ?? json['subjectType']).toLowerCase();
+    // In MovieBox, movies have type 'movie' or numeric subjectType 1 (vs 2 for TV series).
+    if ((providerType != 'movie' && providerType != '1') || _isAdultRecord(json)) return null;
 
     final rawGenre = json['genre'] ?? json['genres'];
     final genres = rawGenre is List
@@ -106,20 +108,25 @@ class ProviderClip {
     if (!normalizedGenres.any(_shortGenreNames.contains)) return null;
     if (normalizedGenres.any(_adultGenres.contains)) return null;
 
-    final title = value(json['base_title'] ?? json['name'] ?? json['title'] ?? json['subject_title']);
-    final subjectId = value(json['subject_id'] ?? json['subjectId'] ?? json['id']);
-    final detailPath = value(json['detail_path'] ?? json['detailPath'] ?? json['slug']);
-    final hasResource = json['has_resource'] == true || json['hasResource'] == true;
+    final title = value(json['base_title'] ?? json['baseTitle'] ?? json['name'] ?? json['title'] ?? json['subject_title'] ?? json['subjectTitle']);
+    var subjectId = value(json['subject_id'] ?? json['subjectId'] ?? json['id']);
+    var detailPath = value(json['detail_path'] ?? json['detailPath'] ?? json['slug']);
+    if (subjectId.isEmpty && detailPath.isNotEmpty) subjectId = detailPath;
+    if (detailPath.isEmpty && subjectId.isNotEmpty) detailPath = subjectId;
+    final hasResource = json['has_resource'] == true ||
+        json['hasResource'] == true ||
+        json['has_resource'] == 1 ||
+        json['hasResource'] == 1;
     if (title.isEmpty || subjectId.isEmpty || detailPath.isEmpty || !hasResource) {
       return null;
     }
     if (_explicitTitle.hasMatch(title)) return null;
 
-    final rawYear = value(json['year'] ?? json['release_year'] ?? json['release_date']);
+    final rawYear = value(json['year'] ?? json['release_year'] ?? json['releaseYear'] ?? json['release_date']);
     final year = int.tryParse(rawYear.length >= 4 ? rawYear.substring(0, 4) : rawYear) ?? 0;
-    final rawRating = value(json['rating'] ?? json['vote_average']);
+    final rawRating = value(json['rating'] ?? json['vote_average'] ?? json['score']);
     final rating = double.tryParse(rawRating) ?? 0.0;
-    final rawPosterUrl = value(json['poster_url'] ?? json['posterUrl']);
+    final rawPosterUrl = ProviderPayload.posterUrl(json);
     final posterUrl = rawPosterUrl.startsWith('https://') ? rawPosterUrl : '';
 
     return ProviderClip(

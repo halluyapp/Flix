@@ -4,7 +4,7 @@ import 'package:http/http.dart' as http;
 
 import '../core/constants/api_constants.dart';
 import '../models/provider_clip.dart';
-import 'zarhosting_service.dart';
+import 'moviebox_service.dart';
 
 enum ClipsFeedSource { supabase, providerFallback }
 
@@ -22,7 +22,7 @@ class ClipsFeed {
 /// catalogue entries. [ClipsFeed.source] lets the UI report which path served
 /// the visible catalogue.
 class ClipsService {
-  final ZarhostingService _provider = ZarhostingService();
+  final MovieBoxService _provider = MovieBoxService();
 
   Future<ClipsFeed> fetchShortFilms() async {
     final backendItems = await _fetchFromSupabase();

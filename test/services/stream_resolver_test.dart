@@ -10,9 +10,9 @@ import 'package:flix/core/provider/provider_failures.dart';
 import 'package:flix/models/caption_load.dart';
 import 'package:flix/models/media_item.dart';
 import 'package:flix/models/provider_match.dart';
+import 'package:flix/services/moviebox_api_client.dart';
+import 'package:flix/services/moviebox_service.dart';
 import 'package:flix/services/stream_resolver.dart';
-import 'package:flix/services/zarhosting_api_client.dart';
-import 'package:flix/services/zarhosting_service.dart';
 
 http.Response _json(String body, [int status = 200]) => http.Response.bytes(
       utf8.encode(body),
@@ -59,18 +59,25 @@ class _Harness {
     final mock = MockClient((request) async {
       requests.add(request.url);
       final path = request.url.path;
+      if (path.endsWith('/home')) {
+        return http.Response(
+          '{"code":0,"data":{}}',
+          200,
+          headers: {'x-user': '{"token":"test-token","userId":"1"}'},
+        );
+      }
       if (path.endsWith('/search')) {
         return _json(
           search ?? _fixture('provider_search_movie.json'),
           200,
         );
       }
-      if (path.endsWith('/captions')) {
+      if (path.endsWith('/caption') || path.endsWith('/captions')) {
         return captionStatus == 200
             ? _json(captions ?? _fixture('provider_captions.json'), 200)
             : _json('{"error":"upstream_error"}', captionStatus);
       }
-      if (path.contains('/stream/')) {
+      if (path.endsWith('/play') || path.contains('/stream/')) {
         return streamStatus == 200
             ? _json(stream ?? _fixture('provider_stream_movie.json'), 200)
             : _json('{"error":"upstream_error"}', streamStatus);
@@ -79,12 +86,13 @@ class _Harness {
     });
 
     resolver = StreamResolver(
-      service: ZarhostingService(
-        client: ZarhostingApiClient(
+      service: MovieBoxService(
+        client: MovieBoxApiClient(
           client: mock,
-          baseUrl: 'https://provider.example.com/api/public/v1',
+          baseUrl: 'https://h5-api.aoneroom.com/wefeed-h5api-bff',
           defaultTimeout: const Duration(seconds: 1),
           sleep: (_) async {},
+          initialToken: const GuestToken(token: 'fixture-jwt'),
         ),
       ),
     );
@@ -93,14 +101,18 @@ class _Harness {
   int count(String fragment) =>
       requests.where((uri) => uri.path.contains(fragment)).length;
 
-  /// Counts stream requests only, excluding the `/captions` sibling endpoint.
+  /// Counts stream requests only, excluding the `/caption` endpoint.
   int countStreams() => requests
       .where((uri) =>
-          uri.path.contains('/stream/') && !uri.path.endsWith('/captions'))
+          (uri.path.endsWith('/play') || uri.path.contains('/stream/')) &&
+          !uri.path.endsWith('/caption') &&
+          !uri.path.endsWith('/captions'))
       .length;
 
   Uri lastStream() => requests.lastWhere((uri) =>
-      uri.path.contains('/stream/') && !uri.path.endsWith('/captions'));
+      (uri.path.endsWith('/play') || uri.path.contains('/stream/')) &&
+      !uri.path.endsWith('/caption') &&
+      !uri.path.endsWith('/captions'));
 
   Uri last(String fragment) =>
       requests.lastWhere((uri) => uri.path.contains(fragment));
@@ -128,15 +140,15 @@ void main() {
       expect(stream.bestSource!.format, 'MP4');
     });
 
-    test('sends the slug as detail_path and no episode parameters', () async {
+    test('sends the slug as detailPath and se=0 ep=0 for movie play', () async {
       final harness = _Harness();
       await harness.resolver.resolve(item: _movie());
 
       final streamRequest = harness.lastStream();
-      expect(streamRequest.queryParameters['detail_path'],
+      expect(streamRequest.queryParameters['detailPath'],
           'inception-e1BOR6f19C7');
-      expect(streamRequest.queryParameters.containsKey('se'), isFalse);
-      expect(streamRequest.queryParameters.containsKey('ep'), isFalse);
+      expect(streamRequest.queryParameters['se'], '0');
+      expect(streamRequest.queryParameters['ep'], '0');
     });
 
     test('dash sources keep their signed cookie header', () async {
@@ -165,11 +177,10 @@ void main() {
 
       expect(resolution.isSuccess, isTrue);
       final request = harness.lastStream();
-      expect(
-        request.path,
-        '/api/public/v1/stream/1382465867459478920',
-      );
-      expect(request.queryParameters['detail_path'],
+      expect(request.path, endsWith('/play'));
+      expect(request.queryParameters['subjectId'],
+          '1382465867459478920');
+      expect(request.queryParameters['detailPath'],
           'breaking-bad-hindi-mz0TdRUH7E1');
       expect(request.queryParameters['se'], '5');
       expect(request.queryParameters['ep'], '1');
@@ -277,7 +288,7 @@ void main() {
         stream: _fixture('provider_stream_episode.json'),
       );
       await harness.resolver.resolve(item: _show(), season: 5, episode: 1);
-      final captionRequest = harness.last('/captions');
+      final captionRequest = harness.last('/caption');
       expect(captionRequest.queryParameters['se'], '5');
       expect(captionRequest.queryParameters['ep'], '1');
     });
@@ -340,7 +351,7 @@ void main() {
 
       expect(resolution.isSuccess, isTrue);
       expect(harness.count('/search'), 0);
-      expect(harness.lastStream().path, contains('/stream/42'));
+      expect(harness.lastStream().queryParameters['subjectId'], '42');
     });
 
     test('rejects a match whose detail path equals its subject id', () async {
@@ -363,7 +374,7 @@ void main() {
       // recovers by searching the provider with the title instead.
       expect(resolution.isSuccess, isTrue);
       expect(
-        harness.requests.any((uri) => uri.path.contains('/stream/42')),
+        harness.requests.any((uri) => uri.path.endsWith('/play') && uri.queryParameters['subjectId'] == '42'),
         isFalse,
       );
     });
