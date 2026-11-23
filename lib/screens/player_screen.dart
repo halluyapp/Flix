@@ -575,11 +575,12 @@ class _PlayerScreenState extends State<PlayerScreen>
         final resumeAt = startAt ?? _resumePosition();
         if (resumeAt > Duration.zero) {
           await controller.seekTo(resumeAt);
+          final activeController = controller;
           Future.delayed(const Duration(milliseconds: 200), () {
-            if (!_disposed && controller.value.isInitialized) {
-              final pos = controller.value.position;
+            if (!_disposed && activeController.value.isInitialized) {
+              final pos = activeController.value.position;
               if (pos.inSeconds < 2 && resumeAt.inSeconds > 4) {
-                controller.seekTo(resumeAt);
+                activeController.seekTo(resumeAt);
               }
             }
           });
@@ -635,11 +636,12 @@ class _PlayerScreenState extends State<PlayerScreen>
         final resumeAt = startAt ?? _resumePosition();
         if (resumeAt > Duration.zero) {
           await controller.seekTo(resumeAt);
+          final activeController = controller!;
           Future.delayed(const Duration(milliseconds: 200), () {
-            if (!_disposed && controller.value.isInitialized) {
-              final pos = controller.value.position;
+            if (!_disposed && activeController.value.isInitialized) {
+              final pos = activeController.value.position;
               if (pos.inSeconds < 2 && resumeAt.inSeconds > 4) {
-                controller.seekTo(resumeAt);
+                activeController.seekTo(resumeAt);
               }
             }
           });
