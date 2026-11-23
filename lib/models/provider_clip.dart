@@ -34,8 +34,6 @@ class ProviderClip {
     'shorts',
     'short film',
     'short films',
-    'animation',
-    'anime',
   };
 
   static const Set<String> _adultGenres = {

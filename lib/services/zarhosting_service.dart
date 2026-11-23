@@ -372,11 +372,13 @@ class ZarhostingService {
       }
 
       final tracks = CaptionResponseAdapter.parse(decoded);
-      return CaptionLoad.loaded(tracks);
+      return tracks.isEmpty
+          ? CaptionLoad(status: CaptionLoadStatus.empty)
+          : CaptionLoad.ofTracks(tracks);
     } on ProviderException catch (error) {
       if (error.statusCode == 404 ||
           error.type == ProviderErrorType.noProviderMatch) {
-        return CaptionLoad.empty();
+        return CaptionLoad(status: CaptionLoadStatus.empty);
       }
       return CaptionLoad.failed(error);
     } catch (error) {
@@ -468,21 +470,27 @@ class ZarhostingService {
       headers[signHeaderKey] = signHeaderValue;
     }
 
+    final res = ProviderPayload.string(item, const ['resolution'])
+        .replaceAll(RegExp(r'[^0-9]'), '');
+    final qVal = int.tryParse(res) ?? 720;
+    final size = ProviderPayload.integer(item, const ['size', 'size_bytes', 'sizeBytes']);
+    final dur = ProviderPayload.integer(
+        item, const ['duration', 'duration_seconds', 'durationSeconds']);
+    final formatKind = format == 'DASH'
+        ? StreamFormat.dash
+        : (format == 'HLS' ? StreamFormat.hls : StreamFormat.mp4);
+
     return StreamSource(
       url: url,
       format: format,
-      resolution: ProviderPayload.string(item, const ['resolution'])
-          .replaceAll(RegExp(r'[^0-9]'), ''),
-      sizeBytes: ProviderPayload.optionalInt(item, const ['size', 'size_bytes']),
-      durationSeconds: ProviderPayload.optionalInt(
-          item, const ['duration', 'duration_seconds']),
+      formatKind: formatKind,
+      resolution: res.isNotEmpty ? '${res}p' : '720p',
+      qualityValue: qVal,
+      sizeBytes: size,
+      durationSeconds: dur,
+      isPreview: false,
       codec: ProviderPayload.string(item, const ['codec', 'codecName']),
-      extraHeaders: headers,
-      vipLocked: ProviderPayload.optionalBool(
-            item,
-            const ['vip_locked', 'vipLocked'],
-          ) ??
-          false,
+      headers: headers,
     );
   }
 

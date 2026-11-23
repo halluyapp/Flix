@@ -47,8 +47,8 @@ class ApiConstants {
   static const Map<String, String> movieboxMediaHeaders = {
     'User-Agent':
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-    'Referer': 'https://mzfi.me/',
-    'Origin': 'https://mzfi.me',
+    'Referer': 'https://moviebox.ph/',
+    'Origin': 'https://moviebox.ph',
     'Accept': '*/*',
   };
 

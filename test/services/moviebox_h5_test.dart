@@ -134,7 +134,7 @@ void main() {
       final mp4 = sources.firstWhere((s) => s.isMp4);
       expect(mp4.resolution, '1080p');
       expect(mp4.isDownloadable, isTrue);
-      expect(mp4.headers['Referer'], 'https://mzfi.me/');
+      expect(mp4.headers['Referer'], 'https://moviebox.ph/');
 
       final dash = sources.firstWhere((s) => s.isDash);
       expect(dash.headers['Cookie'], 'token=abc');
