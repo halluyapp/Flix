@@ -327,39 +327,12 @@ class MovieBoxService {
     String? effectiveStreamId = streamId;
     String? effectiveFormat = format;
 
-    // Look for stream id and format in the recent play cache if not provided
-    if (effectiveStreamId == null || effectiveStreamId.isEmpty) {
+    // Look for stream id and format in the recent play cache if already resolved
+    if ((effectiveStreamId == null || effectiveStreamId.isEmpty) &&
+        _playCache.containsKey(cacheKey)) {
       final cachedPlay = _playCache[cacheKey];
-      Map<String, dynamic>? playBody;
       if (cachedPlay != null && !cachedPlay.isExpired) {
-        playBody = cachedPlay.body;
-      } else {
-        try {
-          final query = <String, String>{
-            'subjectId': match.subjectId,
-            'detailPath': match.detailPath,
-            'se': '$se',
-            'ep': '$ep',
-            'streamSignType': '1',
-            'host': ApiConstants.movieboxHost,
-            'supportCodecs[hevc]': '1',
-            'supportCodecs[h264]': '1',
-          };
-          final decoded = await _client.getJson(
-            '/subject/play',
-            query: query,
-            kind: ProviderRequestKind.stream,
-            timeout: timeout,
-            maxAttempts: 2,
-          );
-          playBody = ProviderPayload.bodyOf(decoded);
-          _playCache[cacheKey] = _CachedPlayInfo(playBody);
-        } catch (_) {
-          // If play resolution fails, we attempt caption fetch with identifiers alone
-        }
-      }
-
-      if (playBody != null) {
+        final playBody = cachedPlay.body;
         final streams = ProviderPayload.listOf(
           playBody['streams'] ?? playBody['sources'],
         );
