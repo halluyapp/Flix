@@ -371,10 +371,7 @@ class ZarhostingService {
         );
       }
 
-      final tracks = CaptionResponseAdapter.parse(decoded);
-      return tracks.isEmpty
-          ? CaptionLoad(status: CaptionLoadStatus.empty)
-          : CaptionLoad.ofTracks(tracks);
+      return CaptionResponseAdapter.parse(decoded);
     } on ProviderException catch (error) {
       if (error.statusCode == 404 ||
           error.type == ProviderErrorType.noProviderMatch) {
