@@ -132,7 +132,7 @@ class ProviderClip {
     if (_explicitTitle.hasMatch(title)) return null;
 
     final rawYear = value(
-        json['year'] ?? json['release_year'] ?? json['release_date']);
+        json['year'] ?? json['release_year'] ?? json['releaseYear'] ?? json['release_date'] ?? json['releaseDate']);
     final year =
         int.tryParse(rawYear.length >= 4 ? rawYear.substring(0, 4) : rawYear) ??
             0;
